@@ -31,6 +31,7 @@ class skiplist_type {
     double p;
 
    public:
+    int getLength() { return length; }
     int randomLevel();
     explicit skiplist_type(double p = 0.25);
     ~skiplist_type();
