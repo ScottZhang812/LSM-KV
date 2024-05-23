@@ -6,6 +6,9 @@
 
 class KVStoreAPI {
    public:
+    std::string dir;
+    std::string vlog;
+
     /**
      * You should put all sstables under `dir`, and all value pairs in `vlog`.
      * Please create one sub-directory for each level, and put sstables
