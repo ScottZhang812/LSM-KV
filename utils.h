@@ -14,16 +14,15 @@
 
 namespace utils
 {
-    /**
-     * Check whether directory exists
-     * @param path directory to be checked.
-     * @return ture if directory exists, false otherwise.
-     */
-    static inline bool dirExists(const std::string &path)
-    {
-        struct stat st;
-        int ret = stat(path.c_str(), &st);
-        return ret == 0 && st.st_mode & S_IFDIR;
+/**
+ * Check whether directory exists
+ * @param path directory to be checked.
+ * @return true if directory exists, false otherwise.
+ */
+static inline bool dirExists(const std::string &path) {
+    struct stat st;
+    int ret = stat(path.c_str(), &st);
+    return ret == 0 && st.st_mode & S_IFDIR;
     }
 
     /**

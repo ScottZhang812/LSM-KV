@@ -1,3 +1,4 @@
+// launch.json
 {
   "version": "0.2.0",
   "configurations": [
@@ -5,7 +6,8 @@
       "name": "Debug",
       "type": "cppdbg",
       "request": "launch",
-      "program": "${workspaceFolder}/${fileBasenameNoExtension}",
+      "preLaunchTask": "build",  // run the build task before launching
+      "program": "${workspaceFolder}/correctness",  // run ./correctness
       "args": [],
       "stopAtEntry": false,
       "cwd": "${workspaceFolder}",

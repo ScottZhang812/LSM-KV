@@ -17,6 +17,9 @@ class BF {
             bitArray[i] = false;
         }
     }
+    ~BF() {
+        if (bitArray != nullptr) delete[] bitArray, bitArray = nullptr;
+    }
     void getHashValue(const uint64_t& key, uint32_t* hashRes) {
         MurmurHash3_x64_128(&key, sizeof(key), 1, hashRes);
     }

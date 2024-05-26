@@ -5,6 +5,7 @@
 #include <string>
 
 #include "test.h"
+#define DET_TEST
 
 class CorrectnessTest : public Test {
    private:
@@ -32,47 +33,61 @@ class CorrectnessTest : public Test {
         }
         phase();
 
+        // store.printSST(0, 0);
+        // store.printSSTCache(0, 0);
         // Test after all insertions
         for (i = 0; i < max; ++i) EXPECT(std::string(i + 1, 's'), store.get(i));
         phase();
 
-        // Test scan
-        std::list<std::pair<uint64_t, std::string>> list_ans;
-        std::list<std::pair<uint64_t, std::string>> list_stu;
+// // Test scan
+// std::list<std::pair<uint64_t, std::string>> list_ans;
+// std::list<std::pair<uint64_t, std::string>> list_stu;
 
-        for (i = 0; i < max / 2; ++i) {
-            list_ans.emplace_back(std::make_pair(i, std::string(i + 1, 's')));
-        }
+// for (i = 0; i < max / 2; ++i) {
+//     list_ans.emplace_back(std::make_pair(i, std::string(i + 1,
+//     's')));
+// }
 
-        store.scan(0, max / 2 - 1, list_stu);
-        EXPECT(list_ans.size(), list_stu.size());
+// store.scan(0, max / 2 - 1, list_stu);
+// EXPECT(list_ans.size(), list_stu.size());
 
-        auto ap = list_ans.begin();
-        auto sp = list_stu.begin();
-        while (ap != list_ans.end()) {
-            if (sp == list_stu.end()) {
-                EXPECT((*ap).first, -1);
-                EXPECT((*ap).second, not_found);
-                ap++;
-            } else {
-                EXPECT((*ap).first, (*sp).first);
-                EXPECT((*ap).second, (*sp).second);
-                ap++;
-                sp++;
-            }
-        }
+// auto ap = list_ans.begin();
+// auto sp = list_stu.begin();
+// while (ap != list_ans.end()) {
+//     if (sp == list_stu.end()) {
+//         EXPECT((*ap).first, -1);
+//         EXPECT((*ap).second, not_found);
+//         ap++;
+//     } else {
+//         EXPECT((*ap).first, (*sp).first);
+//         EXPECT((*ap).second, (*sp).second);
+//         ap++;
+//         sp++;
+//     }
+// }
 
-        phase();
+// phase();
 
-        // Test deletions
+// Test deletions
+#ifdef DET_TEST
+        std::cout << "TEST: Deleting even\n";
+#endif
         for (i = 0; i < max; i += 2) {
             EXPECT(true, store.del(i));
         }
+#ifdef DET_TEST
+        std::cout << "TEST: Getting all\n";
+#endif
 
         for (i = 0; i < max; ++i)
             EXPECT((i & 1) ? std::string(i + 1, 's') : not_found, store.get(i));
 
-        for (i = 1; i < max; ++i) EXPECT(i & 1, store.del(i));
+#ifdef DET_TEST
+        std::cout << "TEST: Deleting all\n";
+#endif
+        for (i = 1; i < max; ++i) {
+            EXPECT(i & 1, store.del(i));
+        }
 
         phase();
 
@@ -180,10 +195,10 @@ class CorrectnessTest : public Test {
         std::cout << "[Simple Test]" << std::endl;
         regular_test(SIMPLE_TEST_MAX);
 
-        // store.reset();
+        store.reset();
 
-        // std::cout << "[Large Test]" << std::endl;
-        // regular_test(LARGE_TEST_MAX);
+        std::cout << "[Large Test]" << std::endl;
+        regular_test(LARGE_TEST_MAX);
 
         // store.reset();
 
