@@ -2,6 +2,7 @@
 
 #include <fstream>
 #include <limits>
+#include <unordered_map>
 #include <vector>
 
 #include "bloom.h"
@@ -26,6 +27,7 @@ typedef uint64_t SST_HEADER_KVNUM_TL;
 #define SS_FILE_SUFFIX ".sst"
 #define VLOG_DEFAULT_MAGIC_VAL 0xff
 #define SS_DIR_PATH_SUFFIX_WITHOUT_LEVELNUM "/level-"
+#define MAX_SST_KV_GROUP_NUM 500
 
 class KVStore : public KVStoreAPI {
     // You can add your implementation here
@@ -40,11 +42,28 @@ class KVStore : public KVStoreAPI {
     SS_OFFSET_TL head;
     SS_OFFSET_TL tail;
     // for ssTable
-    std::vector<FILE_NUM_TL> levelLargestUidList;
+    FILE_NUM_TL largestUid;
     FILE_NUM_TL largestTimeStamp;
     const int memTableLenThreshold =
         (16 * 1024 - 32 - SS_BLOOM_BYTENUM) / (8 + 8 + 4);
     skiplist_type *memTable;
+    // for cache
+    typedef struct CacheItemProps {
+        BF bf;
+        int kvGroupNum;
+        KEY_TL keyList[MAX_SST_KV_GROUP_NUM];
+        SS_OFFSET_TL offsetList[MAX_SST_KV_GROUP_NUM];
+        SS_VLEN_TL vlenList[MAX_SST_KV_GROUP_NUM];
+    };
+    typedef struct sstInfoItemProps {
+        FILE_NUM_TL uid;
+        FILE_NUM_TL timeStamp;
+        KEY_TL minKey;
+        KEY_TL maxKey;
+    };
+    std::unordered_map<FILE_NUM_TL, CacheItemProps>
+        sstCache;  // map `uid` to `cacheItem`
+    std::vector<std::vector<sstInfoItemProps>> sstInfoLevelList;
 
    public:
     KVStore(const std::string &dir, const std::string &vlog);

@@ -10,7 +10,7 @@ KVStore::KVStore(const std::string &dir, const std::string &vlog)
     // TODO: 设置head/tail的值. Belows are temps
     head = 0;
     tail = 0;
-    levelLargestUidList.clear();
+    largestUid = -1;
     largestTimeStamp = -1;
 }
 KVStore::~KVStore() {}
@@ -62,14 +62,10 @@ void KVStore::convertMemTable2File() {
     // write to SSTable. TODO: 现在只做了全部新建到0层
     FILE_NUM_TL targetLevel = 0;
     // check largestUid
-    if (levelLargestUidList.size() <= targetLevel) {
-        while (levelLargestUidList.size() <= targetLevel)
-            levelLargestUidList.push_back(-1);
-    }
-    FILE_NUM_TL uidInLevel = ++(levelLargestUidList[targetLevel]);
+    FILE_NUM_TL newUid = ++largestUid;
     std::string targetPath = dir + SS_DIR_PATH_SUFFIX_WITHOUT_LEVELNUM +
                              std::to_string(targetLevel),
-                newFileName = std::to_string(uidInLevel),
+                newFileName = std::to_string(newUid),
                 newFilePath = targetPath + "/" + newFileName;
     if (!utils::dirExists(targetPath)) utils::_mkdir(targetPath);
     // try to open sstFile
