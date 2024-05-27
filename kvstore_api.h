@@ -29,7 +29,7 @@ class KVStoreAPI {
      * Returns the (string) value of the given key.
      * An empty string indicates not found.
      */
-    virtual std::string get(uint64_t key) = 0;
+    // virtual std::string get(uint64_t key) = 0;
 
     /**
      * Delete the given key-value pair if it exists.

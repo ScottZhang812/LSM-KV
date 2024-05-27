@@ -43,10 +43,7 @@ typedef int SST_LEVEL_TL;
 #define CONVENTIONAL_MISS_FLAG_OFFSET 1
 
 class KVStore : public KVStoreAPI {
-    // You can add your implementation here
    private:
-    // std::string dir; // e.g. "./data"
-    // std::string vlog; // e.g. "./data/vlog"
     // for vlog
     SS_OFFSET_TL head;
     SS_OFFSET_TL tail;
@@ -60,7 +57,6 @@ class KVStore : public KVStoreAPI {
 
    public:
     KVStore(const std::string &dir, const std::string &vlog);
-
     ~KVStore();
 
     typedef uint64_t KEY_TYPE;
@@ -116,17 +112,13 @@ class KVStore : public KVStoreAPI {
         memTable = new skiplist_type();
     }
     void convertMemTable2File();
+
     void put(uint64_t key, const std::string &s) override;
-
-    std::string get(uint64_t key) override;
-
+    std::string get(uint64_t key, SS_OFFSET_TL *userOffsetPtr = nullptr);
     bool del(uint64_t key) override;
-
     void reset() override;
-
     void scan(uint64_t key1, uint64_t key2,
               std::list<std::pair<uint64_t, std::string>> &list) override;
-
     void gc(uint64_t chunk_size) override;
 
     // utils
@@ -144,66 +136,26 @@ class KVStore : public KVStoreAPI {
     void readBFFromSST(std::ifstream &file, BF &bf);
     void readEntryFromSST(std::ifstream &file, SSTEntryProps &entry,
                           int entryIndex);
+    template <typename T>
+    void readDataFromVlog(std::ifstream &file, T &userdata,
+                          SS_OFFSET_TL offset);
+    void readValStringFromVlog(std::ifstream &file, std::string &userString,
+                               SS_OFFSET_TL offset, SS_VLEN_TL vlen);
     SSTEntryProps findOffsetInCacheItem(CacheItemProps *cacheItemPtr,
                                         KEY_TL key);
-    std::string getValueByOffsetNVlen(SS_OFFSET_TL offset, SS_VLEN_TL vlen);
+    std::string getValueByOffsetnVlen(SS_OFFSET_TL offset, SS_VLEN_TL vlen);
+    bool crcCheck(const VLOG_CHECKSUM_TL &curChecksum, const KEY_TL &curKey,
+                  const SS_VLEN_TL &curVlen, const std::string &curValue);
+    VLOG_CHECKSUM_TL calcChecksum(const KEY_TL &curKey,
+                                  const SS_VLEN_TL &curVlen,
+                                  const std::string &curValue);
 
-    // debug utils
-    void printSST(SST_LEVEL_TL level, FILE_NUM_TL uid) {
-        std::cout << "----printSST----\n";
-        std::stringstream ss;
-        ss << dir << "/" << SS_DIR_PATH_SUFFIX_WITHOUT_LEVELNUM << level << "/"
-           << uid << SS_FILE_SUFFIX;
-        std::string filePath = ss.str();
-        std::ifstream file(filePath, std::ios::binary);
-        if (!file) {
-            std::cerr << "Failed to open file: " << filePath << std::endl;
-            return;
-        }
-        SSTHeaderProps headerProps;
-        readHeaderPropsFromSST(file, headerProps);
-        std::cout << "timestamp: " << headerProps.timestamp
-                  << ",kvNum: " << headerProps.kvNum
-                  << ",minKey: " << headerProps.minKey
-                  << ",maxKey: " << headerProps.maxKey << std::endl;
-        // std::cout << "BF: \n";
-        // BF bf;
-        // readBFFromSST(file, bf);
-        // for (int i = 0; i < DEFAULT_M_VAL; i++)
-        //     std::cout << (bf.bitArray[i] ? 1 : 0);
-        // std::cout << std::endl;
-        std::cout << "entries: \n";
-        for (int i = 0; i < headerProps.kvNum; i++) {
-            SSTEntryProps entry;
-            readEntryFromSST(file, entry, i);
-            std::cout << "[" << i << ": " << entry.key << ", " << entry.offset
-                      << ", " << entry.vlen << "]";
-        }
-        std::cout << std::endl;
-        std::cout << "----END printSST----\n";
-    }
-    void printSSTCache(SST_LEVEL_TL level, FILE_NUM_TL uid) {
-        CacheItemProps *cacheItemPtr = sstCache[uid];
-        if (cacheItemPtr == nullptr) {
-            std::cerr << "ERR: CacheItemPtr==nullptr\n";
-            return;
-        }
-        std::cout << "----printCache----\n";
-
-        std::cout << ",kvNum: " << cacheItemPtr->kvNum;
-        // std::cout << "BF: \n";
-        // BF bf;
-        // readBFFromSST(file, bf);
-        // for (int i = 0; i < DEFAULT_M_VAL; i++)
-        //     std::cout << (bf.bitArray[i] ? 1 : 0);
-        // std::cout << std::endl;
-        std::cout << "entries: \n";
-        for (int i = 0; i < cacheItemPtr->kvNum; i++) {
-            std::cout << "[" << i << ": " << cacheItemPtr->keyList[i] << ", "
-                      << cacheItemPtr->offsetList[i] << ", "
-                      << cacheItemPtr->vlenList[i] << "]";
-        }
-        std::cout << std::endl;
-        std::cout << "----END printCache----\n";
-    }
+    /*
+     *debug utils and less important utils
+     */
+    void printSST(SST_LEVEL_TL level, FILE_NUM_TL uid);
+    void printSSTCache(SST_LEVEL_TL level, FILE_NUM_TL uid);
+    bool checkTailCandidateValidity(int candidate);
+    SS_OFFSET_TL getHead() { return head; }
+    SS_OFFSET_TL getTail() { return tail; }
 };

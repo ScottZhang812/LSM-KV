@@ -5,13 +5,14 @@
 #include <string>
 
 #include "test.h"
-#define DET_TEST
+// #define DET_TEST
 
 class CorrectnessTest : public Test {
    private:
     const uint64_t SIMPLE_TEST_MAX = 512;
     const uint64_t LARGE_TEST_MAX = 1024 * 64;
     const uint64_t GC_TEST_MAX = 1024 * 48;
+    // const uint64_t GC_TEST_MAX = 1024 * 48;  // to be UPDATED
 
     void regular_test(uint64_t max) {
         uint64_t i;
@@ -97,11 +98,17 @@ class CorrectnessTest : public Test {
     void gc_test(uint64_t max) {
         uint64_t i;
         uint64_t gc_trigger = 1024;
-
+#ifdef DET_TEST
+        std::cout << "TEST: Putting all\n";
+#endif
         for (i = 0; i < max; ++i) {
             store.put(i, std::string(i + 1, 's'));
         }
 
+        // store.printSST(0,0);
+#ifdef DET_TEST
+        std::cout << "TEST: Gettting and Updating differently\n";
+#endif
         for (i = 0; i < max; ++i) {
             EXPECT(std::string(i + 1, 's'), store.get(i));
             switch (i % 3) {
@@ -119,6 +126,11 @@ class CorrectnessTest : public Test {
             }
 
             if (i % gc_trigger == 0) [[unlikely]] {
+#ifdef DET_TEST
+                std::cout << "curHead: " << store.getHead() << "\n";
+                std::cout << "curTail: " << store.getTail() << "\n";
+                std::cout << "TEST: Checking new round of GC\n";
+#endif
                 check_gc(16 * MB);
             }
         }
@@ -200,10 +212,10 @@ class CorrectnessTest : public Test {
         std::cout << "[Large Test]" << std::endl;
         regular_test(LARGE_TEST_MAX);
 
-        // store.reset();
+        store.reset();
 
-        // std::cout << "[GC Test]" << std::endl;
-        // gc_test(GC_TEST_MAX);
+        std::cout << "[GC Test]" << std::endl;
+        gc_test(GC_TEST_MAX);
     }
 };
 
