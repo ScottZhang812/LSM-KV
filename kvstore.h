@@ -242,6 +242,8 @@ class KVStore : public KVStoreAPI {
                          std::vector<sstInfoItemProps> &userSSTList,
                          SS_TIMESTAMP_TL timestampToWrite);
     void writeSSTToDisk(FILE_NUM_TL level, std::vector<sstInfoItemProps> &list);
+    void writeSSTToCache(FILE_NUM_TL level,
+                         std::vector<sstInfoItemProps> &list);
     /*
      *debug utils and less important utils
      */

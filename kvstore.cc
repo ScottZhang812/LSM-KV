@@ -228,16 +228,7 @@ void KVStore::convertAndWriteMemTable() {
     std::list<std::pair<KEY_TL, std::string>> list;
     std::vector<SS_OFFSET_TL> offsetList;
     std::vector<SS_VLEN_TL> vlenList;
-    // KEY_TL minKey, maxKey;  // for writing to SST
     memTable->scan(0, std::numeric_limits<uint64_t>::max(), list);
-    // if (!list.empty()) {
-    //     minKey = list.front().first;
-    //     maxKey = list.back().first;
-    // } else {
-    //     std::cerr << "MemTable is empty.\n";
-    //     return;
-    // }
-    // SST_HEADER_KVNUM_TL kvNum = list.size();
     for (const auto &item : list) {
         VLOG_MAGIC_TL magic = 0xff;  // i.e. VLOG_MAGIC_TL
         SS_VLEN_TL vlen;
@@ -260,7 +251,7 @@ void KVStore::convertAndWriteMemTable() {
     head = vlogFile.tellp();
     vlogFile.close();
 
-    // 根据KeyOffsetList生成若干个sstFile
+    // 根据key/offset/vlenList生成若干个sstFile
     std::vector<sstInfoItemProps> SSTList;
     std::list<KEY_TL> keyList;
     std::transform(
@@ -274,14 +265,7 @@ void KVStore::convertAndWriteMemTable() {
     writeSSTToDisk(targetLevel, SSTList);
     // 接着写入缓存
     // slippery
-    if ((long)levelCache.size() - 1 < (long)targetLevel)
-        levelCache.resize(targetLevel + 1);
-    for (auto &item : SSTList) {
-        auto emplaceResult = levelCache[targetLevel].emplace(
-            std::piecewise_construct, std::forward_as_tuple(item.minKey),
-            std::forward_as_tuple(item));
-        hashCachePtrByUid[item.uid] = &((*emplaceResult).second);
-    }
+    writeSSTToCache(targetLevel, SSTList);
 
     // // 判断新增sst后，第0层是否溢出
     // // 先尝试更新sstInfo
@@ -582,7 +566,16 @@ void KVStore::writeSSTToDisk(FILE_NUM_TL level,
         sstFile.close();
     }
 }
-
+void KVStore::writeSSTToCache(FILE_NUM_TL level,
+                              std::vector<sstInfoItemProps> &list) {
+    if ((long)levelCache.size() - 1 < (long)level) levelCache.resize(level + 1);
+    for (auto &item : list) {
+        auto emplaceResult = levelCache[level].emplace(
+            std::piecewise_construct, std::forward_as_tuple(item.minKey),
+            std::forward_as_tuple(item));
+        hashCachePtrByUid[item.uid] = &((*emplaceResult).second);
+    }
+}
 // deprecated
 // void KVStore::mergeFilesAndAddToDiskAndCache(
 //     std::vector<PtrTrackProps> &ptrTracks, size_t levelToWrite) {
