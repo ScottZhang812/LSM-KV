@@ -17,6 +17,12 @@ class BF {
             bitArray[i] = false;
         }
     }
+    BF(const BF& other) : m(other.m), k(other.k) {
+        bitArray = new bool[m];
+        for (int i = 0; i < m; i++) {
+            bitArray[i] = other.bitArray[i];
+        }
+    }
     ~BF() {
         if (bitArray != nullptr) delete[] bitArray, bitArray = nullptr;
     }

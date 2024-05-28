@@ -1,7 +1,12 @@
 #pragma once
 
+#include <algorithm>
+#include <cassert>
 #include <fstream>
 #include <limits>
+#include <map>
+#include <queue>
+#include <set>
 #include <unordered_map>
 #include <vector>
 
@@ -36,11 +41,12 @@ typedef int SST_LEVEL_TL;
 #define SS_FILE_SUFFIX ".sst"
 #define VLOG_DEFAULT_MAGIC_VAL 0xff
 #define SS_DIR_PATH_SUFFIX_WITHOUT_LEVELNUM "/level-"
-#define MAX_SST_KV_GROUP_NUM 500
+#define MAX_SST_KV_GROUP_NUM 408  // actually same as memTableLenThreshold
 #define MAX_CACHE_ENTRIES 1000000
 #define SS_ENTRY_BYTENUM (SS_KEY_BYTENUM + SS_OFFSET_BYTENUM + SS_VLEN_BYTENUM)
 #define DELETE_MARK "~DELETED~"
 #define CONVENTIONAL_MISS_FLAG_OFFSET 1
+#define MAX_FILE_NUM_GIVEN_LEVEL(level) ((FILE_NUM_TL)1 << (level + 1))
 
 class KVStore : public KVStoreAPI {
    private:
@@ -91,27 +97,101 @@ class KVStore : public KVStoreAPI {
     struct sstInfoItemProps {
         FILE_NUM_TL uid;
         FILE_NUM_TL timeStamp;
+        SST_HEADER_KVNUM_TL kvNum;
         KEY_TL minKey;
         KEY_TL maxKey;
+        KEY_TL keyList[MAX_SST_KV_GROUP_NUM];
+        SS_OFFSET_TL offsetList[MAX_SST_KV_GROUP_NUM];
+        SS_VLEN_TL vlenList[MAX_SST_KV_GROUP_NUM];
+        BF bf;
         // bool hasCached;
         sstInfoItemProps(FILE_NUM_TL _uid, FILE_NUM_TL _timeStamp,
-                         KEY_TL _minKey, KEY_TL _maxKey)
+                         SST_HEADER_KVNUM_TL _kvNum, KEY_TL _minKey,
+                         KEY_TL _maxKey,
+                         std::list<KEY_TL>::const_iterator _keyList,
+                         std::vector<SS_OFFSET_TL>::const_iterator _offsetList,
+                         std::vector<SS_VLEN_TL>::const_iterator _vlenList)
             : uid(_uid),
               timeStamp(_timeStamp),
+              kvNum(_kvNum),
               minKey(_minKey),
-              maxKey(_maxKey) {}
+              maxKey(_maxKey),
+              bf() {
+            for (SST_HEADER_KVNUM_TL i = 0; i < kvNum; i++) {
+                keyList[i] = *_keyList;
+                offsetList[i] = _offsetList[i];
+                vlenList[i] = _vlenList[i];
+                bf.insert(keyList[i]);
+                _keyList++;
+            }
+        }
+        sstInfoItemProps(const sstInfoItemProps &other)
+            : uid(other.uid),
+              timeStamp(other.timeStamp),
+              kvNum(other.kvNum),
+              minKey(other.minKey),
+              maxKey(other.maxKey),
+              bf(other.bf) {
+            for (SST_HEADER_KVNUM_TL i = 0; i < kvNum; i++) {
+                keyList[i] = other.keyList[i];
+                offsetList[i] = other.offsetList[i];
+                vlenList[i] = other.vlenList[i];
+            }
+        }
     };
-
+    struct PtrTrackProps {
+        std::vector<sstInfoItemProps> fileInfoList;
+        PtrTrackProps(std::vector<sstInfoItemProps> _fileInfoList)
+            : fileInfoList(std::move(_fileInfoList)) {}
+    };
+    struct CompareOfSstInfo {
+        bool operator()(const sstInfoItemProps &a,
+                        const sstInfoItemProps &b) const {
+            return a.minKey < b.minKey;
+        }
+    };
     // for cache
-    std::unordered_map<FILE_NUM_TL, CacheItemProps *>
-        sstCache;  // map `uid` to `cacheItem`
-    std::vector<std::vector<sstInfoItemProps>> sstInfoLevelList;
+    // static std::unordered_map<FILE_NUM_TL, CacheItemProps *>
+    //     sstCache;  // map `uid` to `cacheItem`
+    std::unordered_map<FILE_NUM_TL, sstInfoItemProps *>
+        hashCachePtrByUid;  // map `uid` to cachePtr
+    std::vector<std::multimap<KEY_TL, sstInfoItemProps>>
+        levelCache;  // slippery. Ordered by: minKey
+    // for priority_queue
+    struct TrackPointerProps {
+        FILE_NUM_TL fileIndex;
+        size_t CacheItemIndex;
+        FILE_NUM_TL fileUid;  // dependent to `fileIndex`
+        SST_HEADER_KVNUM_TL fileKVNum;
+        size_t trackIndex;
+
+        TrackPointerProps(FILE_NUM_TL _fileIndex, size_t _CacheItemIndex,
+                          FILE_NUM_TL _fileUid, SST_HEADER_KVNUM_TL _fileKVNum,
+                          size_t _trackIndex)
+            : fileIndex(_fileIndex),
+              CacheItemIndex(_CacheItemIndex),
+              fileUid(_fileUid),
+              fileKVNum(_fileKVNum),
+              trackIndex(_trackIndex) {}
+    };
+    // struct CompareForPointerQueue {
+    //     // to get minimum, just define `>`
+    //     bool operator()(const TrackPointerProps &a,
+    //                     const TrackPointerProps &b) const {
+    //         KEY_TL keya = ((sstCache[a.fileUid])->keyList)[a.CacheItemIndex],
+    //                keyb = ((sstCache[b.fileUid])->keyList)[b.CacheItemIndex];
+    //         if (keya > keyb) return true;
+    //         if (keya < keyb) return false;
+    //         // keya == keyb
+    //         return a.
+    //     }
+    // };
 
     void clearMemTable() {
         if (memTable) delete memTable;
         memTable = new skiplist_type();
     }
-    void convertMemTable2File();
+    void convertAndWriteMemTable();
 
     void put(uint64_t key, const std::string &s) override;
     std::string get(uint64_t key, SS_OFFSET_TL *userOffsetPtr = nullptr);
@@ -141,15 +221,27 @@ class KVStore : public KVStoreAPI {
                           SS_OFFSET_TL offset);
     void readValStringFromVlog(std::ifstream &file, std::string &userString,
                                SS_OFFSET_TL offset, SS_VLEN_TL vlen);
-    SSTEntryProps findOffsetInCacheItem(CacheItemProps *cacheItemPtr,
-                                        KEY_TL key);
+    SSTEntryProps findOffsetInSSTInfoItemPtr(sstInfoItemProps *sstInfoItemPtr,
+                                             KEY_TL key);
     std::string getValueByOffsetnVlen(SS_OFFSET_TL offset, SS_VLEN_TL vlen);
     bool crcCheck(const VLOG_CHECKSUM_TL &curChecksum, const KEY_TL &curKey,
                   const SS_VLEN_TL &curVlen, const std::string &curValue);
     VLOG_CHECKSUM_TL calcChecksum(const KEY_TL &curKey,
                                   const SS_VLEN_TL &curVlen,
                                   const std::string &curValue);
-
+    void deleteSSTInDisknCache(FILE_NUM_TL uid, FILE_NUM_TL level);
+    void mergeFilesAndAddToDiskAndCache(std::vector<PtrTrackProps> &ptrTracks,
+                                        size_t levelToWrite);
+    void mergeFilesAndReturnKeyOffsetList(
+        std::vector<PtrTrackProps> &ptrTracks,
+        std::list<std::pair<KEY_TL, SS_OFFSET_TL>>);
+    void simpleConvertMemTable2File();
+    void generateSSTList(const std::list<KEY_TL> &keyList,
+                         const std::vector<SS_OFFSET_TL> &offsetList,
+                         const std::vector<SS_VLEN_TL> &vlenList,
+                         std::vector<sstInfoItemProps> &userSSTList,
+                         SS_TIMESTAMP_TL timestampToWrite);
+    void writeSSTToDisk(FILE_NUM_TL level, std::vector<sstInfoItemProps> &list);
     /*
      *debug utils and less important utils
      */
