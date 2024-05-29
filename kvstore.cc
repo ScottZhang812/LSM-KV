@@ -6,6 +6,7 @@ using namespace skiplist;
 // #define WA
 // #define LAST_WA
 // #define WATCH
+// #define GC_DEBUG
 
 long visitInd = 0;
 
@@ -197,11 +198,20 @@ void KVStore::gc(uint64_t chunk_size) {
         if (sstOffsetRes == CONVENTIONAL_MISS_FLAG_OFFSET ||
             sstOffsetRes != tail) {
             // not latest data. do nothing
+            if (WATCHED_GC_KEY && curKey == WATCHED_GC_KEY)
+                std::cout << "not latest data. do nothing - ";
         } else {
             // is latest data
+            if (WATCHED_GC_KEY && curKey == WATCHED_GC_KEY)
+                std::cout << "IS latest data. put new value - ";
             std::string curValue;
             offsetRecord += SS_VLEN_BYTENUM;
             readValStringFromVlog(vlogFile, curValue, offsetRecord, curVlen);
+#ifdef GC_DEBUG
+            if (curKey == WATCHED_GC_KEY)
+                std::cout << "curValue: " << curValue << "\n";
+#endif
+            // del(curKey);
             put(curKey, curValue);
         }
 
@@ -249,6 +259,11 @@ void KVStore::convertAndWriteMemTable() {
     std::vector<SS_OFFSET_TL> offsetList;
     std::vector<SS_VLEN_TL> vlenList;
     memTable->scan(0, std::numeric_limits<uint64_t>::max(), list);
+
+    if (memTable->get(WATCHED_GC_KEY)) {
+        std::cout << "\n";
+    }
+
     for (const auto &item : list) {
         VLOG_MAGIC_TL magic = 0xff;  // i.e. VLOG_MAGIC_TL
         SS_VLEN_TL vlen;
@@ -264,9 +279,9 @@ void KVStore::convertAndWriteMemTable() {
         head = vlogFile.tellp();
         offsetList.push_back(head);
         vlenList.push_back(vlen);
-        if (item.second == DELETE_MARK)
+        if (item.second == DELETE_MARK) {
             writeVlogEntry(vlogFile, magic, checksum, item.first, vlen, "");
-        else
+        } else
             writeVlogEntry(vlogFile, magic, checksum, item.first, vlen,
                            item.second);
     }
@@ -566,6 +581,10 @@ void KVStore::readDataFromVlog(std::ifstream &file, T &userdata,
 void KVStore::readValStringFromVlog(std::ifstream &file,
                                     std::string &userString,
                                     SS_OFFSET_TL offset, SS_VLEN_TL vlen) {
+    if (!vlen) {
+        userString = DELETE_MARK;
+        return;
+    }
     file.seekg(offset);
     char *buffer = new char[vlen];
     file.read(buffer, vlen);
@@ -987,7 +1006,8 @@ void KVStore::generateSSTList(const std::list<KEY_TL> &keyList,
             // #ifdef WATCH
             if (WATCHED_KEY && *tmpIter == WATCHED_KEY) {
                 std::cout << "WATCHED_KEY in sstuid: " << largestUid + 1
-                          << "\n";
+                          << " offset: " << offsetList[ind]
+                          << " timestamp: " << timestampToWrite << " \n";
             }
             // #endif
             std::advance(tmpIter, 1);
@@ -1011,14 +1031,27 @@ void KVStore::printUidContainsWatchedKey() {
              ++itemIter) {
             auto &item = *itemIter;
             for (SST_HEADER_KVNUM_TL ii = 0; ii < item.second.kvNum; ii++)
-                if (item.second.keyList[ii] == WATCHED_KEY) {
+                if (item.second.keyList[ii] == WATCHED_GC_KEY) {
                     std::cout << "SNAPSHOT: key in " << item.second.uid
                               << " at level: " << i << "\n";
+                    for (int zz = 0; zz < item.second.kvNum; zz++) {
+                        if (item.second.keyList[zz] == WATCHED_GC_KEY) {
+                            std::cout << "[" << item.second.keyList[zz] << ", "
+                                      << item.second.offsetList[zz] << ", "
+                                      << item.second.vlenList[zz] << "]";
+                        }
+                    }
                 }
         }
     }
 }
-
+void KVStore::lookInMemtable(KEY_TL key) {
+    auto res = memTable->get(key);
+    if (res.has_value())
+        std::cout << "spot in memtable: " << res.value() << "\n";
+    else
+        std::cout << "NOT spot in memtable\n";
+}
 //
 // void KVStore::simpleConvertMemTable2File() {
 //     // write to vLog

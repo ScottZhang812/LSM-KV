@@ -49,7 +49,12 @@ typedef int SST_LEVEL_TL;
 #define MAX_FILE_NUM_GIVEN_LEVEL(level) ((FILE_NUM_TL)1 << (level + 1))
 // #define WATCHED_KEY 1122
 // #define WATCHED_KEY 65485
+
+// #define WATCHED_KEY 4590
+// #define WATCHED_GC_KEY 4590
+
 #define WATCHED_KEY 0
+#define WATCHED_GC_KEY 0
 // #define WATCHED_FILEUID 673
 // #define WATCHED_FILEUID 3371
 #define WATCHED_FILEUID 0
@@ -183,8 +188,23 @@ class KVStore : public KVStoreAPI {
             if (keya > keyb) return true;
             if (keya < keyb) return false;
             // keya == keyb
-            return ptrTracks[a.trackIndex].fileInfoList[a.fileIndex].timeStamp <
-                   ptrTracks[b.trackIndex].fileInfoList[b.fileIndex].timeStamp;
+            // SLIPPERY
+            return ptrTracks[a.trackIndex]
+                       .fileInfoList[a.fileIndex]
+                       .offsetList[a.CacheItemIndex] <
+                   ptrTracks[b.trackIndex]
+                       .fileInfoList[b.fileIndex]
+                       .offsetList[b.CacheItemIndex];
+            // SLIPPERY: 我把timestamp改成了uid，尝试一下
+            SS_TIMESTAMP_TL
+            timestampA =
+                ptrTracks[a.trackIndex].fileInfoList[a.fileIndex].timeStamp,
+            timestampB =
+                ptrTracks[b.trackIndex].fileInfoList[b.fileIndex].timeStamp;
+            if (timestampA != timestampB) return timestampA < timestampB;
+            // timestampA == timestampB
+            return ptrTracks[a.trackIndex].fileInfoList[a.fileIndex].uid <
+                   ptrTracks[b.trackIndex].fileInfoList[b.fileIndex].uid;
         }
     };
 
@@ -286,4 +306,5 @@ class KVStore : public KVStoreAPI {
         std::cout << "//";
         fflush(stdout);
     }
+    void lookInMemtable(FILE_NUM_TL uid);
 };
