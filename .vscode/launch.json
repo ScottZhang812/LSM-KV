@@ -8,7 +8,7 @@
       "request": "launch",
       "preLaunchTask": "build",  // run the build task before launching
       "program": "${workspaceFolder}/correctness",  // run ./correctness
-      "args": [],
+      "args": ["-v"],
       "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
       "environment": [],

@@ -26,6 +26,18 @@ class BF {
     ~BF() {
         if (bitArray != nullptr) delete[] bitArray, bitArray = nullptr;
     }
+    BF& operator=(const BF& other) {
+        if (this != &other) {
+            if (bitArray != nullptr) delete[] bitArray, bitArray = nullptr;
+            m = other.m;
+            k = other.k;
+            bitArray = new bool[m];
+            for (int i = 0; i < m; i++) {
+                bitArray[i] = other.bitArray[i];
+            }
+        }
+        return *this;
+    }
     void getHashValue(const uint64_t& key, uint32_t* hashRes) {
         MurmurHash3_x64_128(&key, sizeof(key), 1, hashRes);
     }

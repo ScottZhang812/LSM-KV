@@ -5,14 +5,14 @@
 #include <string>
 
 #include "test.h"
-// #define DET_TEST
+#define DET_TEST
+// #define SIMPLE_CASES
 
 class CorrectnessTest : public Test {
    private:
     const uint64_t SIMPLE_TEST_MAX = 512;
     const uint64_t LARGE_TEST_MAX = 1024 * 64;
     const uint64_t GC_TEST_MAX = 1024 * 48;
-    // const uint64_t GC_TEST_MAX = 1024 * 48;  // to be UPDATED
 
     void regular_test(uint64_t max) {
         uint64_t i;
@@ -34,8 +34,6 @@ class CorrectnessTest : public Test {
         }
         phase();
 
-        // store.printSST(0, 0);
-        // store.printSSTCache(0, 0);
         // Test after all insertions
         for (i = 0; i < max; ++i) EXPECT(std::string(i + 1, 's'), store.get(i));
         phase();
@@ -74,20 +72,33 @@ class CorrectnessTest : public Test {
         std::cout << "TEST: Deleting even\n";
 #endif
         for (i = 0; i < max; i += 2) {
-            EXPECT(true, store.del(i));
+#ifdef DET_TEST
+            // std::cout << "TEST: Deleting " << i << " ";
+#endif
+            EXPECTI(true, store.del(i), i);
         }
 #ifdef DET_TEST
         std::cout << "TEST: Getting all\n";
 #endif
-
+        // for (i = 0; i < 1000; ++i)
+        //     EXPECTI((i & 1) ? std::string(i + 1, 's') : not_found,
+        //     store.get(i),
+        //             i);
         for (i = 0; i < max; ++i)
-            EXPECT((i & 1) ? std::string(i + 1, 's') : not_found, store.get(i));
+            EXPECTI((i & 1) ? std::string(i + 1, 's') : not_found, store.get(i),
+                    i);
+
+            // store.printUidContainsWatchedKey();
 
 #ifdef DET_TEST
         std::cout << "TEST: Deleting all\n";
 #endif
+        // for (i = 1; i < 5000; ++i) {
+        //     EXPECTI(i & 1, store.del(i), i);
+        // }
         for (i = 1; i < max; ++i) {
-            EXPECT(i & 1, store.del(i));
+            if (i == 65485) store.printSST(7, 3371);
+            EXPECTI(i & 1, store.del(i), i);
         }
 
         phase();
@@ -202,10 +213,10 @@ class CorrectnessTest : public Test {
     void start_test(void *args = NULL) override {
         std::cout << "KVStore Correctness Test" << std::endl;
 
-        store.reset();
+        // store.reset();
 
-        std::cout << "[Simple Test]" << std::endl;
-        regular_test(SIMPLE_TEST_MAX);
+        // std::cout << "[Simple Test]" << std::endl;
+        // regular_test(SIMPLE_TEST_MAX);
 
         store.reset();
 

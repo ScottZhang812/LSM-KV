@@ -3,7 +3,13 @@
 #include <string>
 using namespace skiplist;
 // #define DET
+// #define WA
+// #define LAST_WA
+// #define WATCH
 
+long visitInd = 0;
+
+std::vector<KVStore::PtrTrackProps> KVStore::ptrTracks;
 KVStore::KVStore(const std::string &dir, const std::string &vlog)
     : KVStoreAPI(dir, vlog) {
     memTable = new skiplist_type();
@@ -13,6 +19,9 @@ KVStore::KVStore(const std::string &dir, const std::string &vlog)
     tail = 0;
     largestUid = 0;
     largestTimeStamp = 0;
+
+    // 胡乱写的
+    ptrTracks.clear();
 }
 KVStore::~KVStore() {}
 
@@ -29,10 +38,11 @@ void KVStore::put(uint64_t key, const std::string &s) {
             memTable->put(key, s);
         else {
             // memTable overflow, don't insert now
-#ifdef DET
-            std::cout << "memtable is full. Start to convert to sst.\n"
-                      << "At 'key'=" << key << std::endl;
-#endif
+            // #ifdef DET
+            //             std::cout << "memtable is full. Start to convert to
+            //             sst.\n"
+            //                       << "At 'key'=" << key << std::endl;
+            // #endif
             convertAndWriteMemTable();
             clearMemTable();
             memTable->put(key, s);
@@ -47,18 +57,19 @@ void KVStore::put(uint64_t key, const std::string &s) {
 std::string KVStore::get(uint64_t key, SS_OFFSET_TL *userOffsetPtr) {
     std::optional<std::string> res = memTable->get(key);
     if (res.has_value()) return res.value() != DELETE_MARK ? res.value() : "";
+    // #ifdef DET
+    //     std::cout << "memtable miss. Go to SST to find " << key << "\n";
+    // #endif
     // cannot find in Memtable
-    SS_TIMESTAMP_TL maxTimeStamp = 0;
-    VALUE_TL ans = "";
-    SS_OFFSET_TL offsetAns = CONVENTIONAL_MISS_FLAG_OFFSET;
     for (size_t i = 0; i < levelCache.size(); ++i) {
         auto &level = levelCache[i];
-
-        // 暂时方案：sst全放第0层。这样不能在找到时直接返回，必须收集第0层所有可能的结果，比较时间戳。
-        // 简化：在第0层从后往前搜，找到时直接返回。但是引入compaction之后需要大改
+        SS_TIMESTAMP_TL maxTimeStamp = 0;
+        VALUE_TL ans = "";
+        SS_OFFSET_TL offsetAns = CONVENTIONAL_MISS_FLAG_OFFSET;
         for (auto itemIter = level.begin(); itemIter != level.end();
              ++itemIter) {
             auto &item = *itemIter;
+            if (key < item.second.minKey || key > item.second.maxKey) continue;
             FILE_NUM_TL curUid = item.second.uid;
             sstInfoItemProps *sstInfoItemPtr = hashCachePtrByUid[curUid];
             SSTEntryProps offsetRes =
@@ -73,26 +84,34 @@ std::string KVStore::get(uint64_t key, SS_OFFSET_TL *userOffsetPtr) {
                         ans = "";
                         offsetAns = offsetRes.offset;
                     }
-                }
-                // if (userOffsetPtr != nullptr) {
-                //     *userOffsetPtr = offsetRes.offset;
-                //     return "";
-                // }
-                if (sstInfoItemPtr->timeStamp > maxTimeStamp) {
-                    maxTimeStamp = sstInfoItemPtr->timeStamp;
-                    ans =
-                        getValueByOffsetnVlen(offsetRes.offset, offsetRes.vlen);
-                    offsetAns = offsetRes.offset;
+                } else {
+                    if (sstInfoItemPtr->timeStamp > maxTimeStamp) {
+                        maxTimeStamp = sstInfoItemPtr->timeStamp;
+                        ans = getValueByOffsetnVlen(offsetRes.offset,
+                                                    offsetRes.vlen);
+                        offsetAns = offsetRes.offset;
+                    }
                 }
             }
         }
+        if (maxTimeStamp) {
+            // found at least one entry
+            if (userOffsetPtr != nullptr) {
+                if (offsetAns != CONVENTIONAL_MISS_FLAG_OFFSET)
+                    *userOffsetPtr = offsetAns;
+#ifdef DET
+                std::cout << "return empty because only needs offset\n";
+#endif
+                return "";
+            } else
+                return ans;
+        }
     }
-    if (userOffsetPtr != nullptr) {
-        if (offsetAns != CONVENTIONAL_MISS_FLAG_OFFSET)
-            *userOffsetPtr = offsetAns;
-        return "";
-    }
-    return ans;
+// not found
+#ifdef DET
+    std::cout << "return empty because not found\n";
+#endif
+    return "";
 }
 /**
  * Delete the given key-value pair if it exists.
@@ -135,6 +154,7 @@ void KVStore::reset() {
     // delete cache
     levelCache.clear();
     hashCachePtrByUid.clear();
+    ptrTracks.clear();
 
     head = 0, tail = 0;
     // others
@@ -244,7 +264,9 @@ void KVStore::convertAndWriteMemTable() {
         head = vlogFile.tellp();
         offsetList.push_back(head);
         vlenList.push_back(vlen);
-        if (item.second != DELETE_MARK)
+        if (item.second == DELETE_MARK)
+            writeVlogEntry(vlogFile, magic, checksum, item.first, vlen, "");
+        else
             writeVlogEntry(vlogFile, magic, checksum, item.first, vlen,
                            item.second);
     }
@@ -257,6 +279,16 @@ void KVStore::convertAndWriteMemTable() {
     std::transform(
         list.begin(), list.end(), std::back_inserter(keyList),
         [](const std::pair<KEY_TL, std::string> &pair) { return pair.first; });
+#ifdef LAST_WA
+    if (!std::is_sorted(keyList.begin(), keyList.end())) {
+        auto it = std::adjacent_find(keyList.begin(), keyList.end(),
+                                     std::greater<KEY_TL>());
+        if (it != keyList.end()) {
+            std::cerr << "Error: keyList is not sorted. The pair (" << *it
+                      << ", " << *(std::next(it)) << ") is out of order.\n";
+        }
+    }
+#endif
     generateSSTList(keyList, offsetList, vlenList, SSTList, ++largestTimeStamp);
 
     // write to SSTable.
@@ -267,57 +299,123 @@ void KVStore::convertAndWriteMemTable() {
     // slippery
     writeSSTToCache(targetLevel, SSTList);
 
-    // // 判断新增sst后，第0层是否溢出
-    // // 先尝试更新sstInfo
-    // if (sstInfoLevelList.size() < targetLevel + 1) {
-    //     sstInfoLevelList.resize(targetLevel + 1);
-    // }
-    // sstInfoLevelList[targetLevel].insert(
-    //     sstInfoItemProps(newUid, curTimeStamp, minKey, maxKey, kvNum));
-    // if (sstInfoLevelList[targetLevel].size() >
-    //     MAX_FILE_NUM_GIVEN_LEVEL(targetLevel)) {
-    //     // 从level0合并
-    //     std::vector<PtrTrackProps> ptrTracks;
-    //     // 生成前3条track
-    //     std::vector<KEY_TL> tmpMinKeyVector;
-    //     std::vector<KEY_TL> tmpMaxKeyVector;
-    //     for (int i = 0; i < 3; ++i) {
-    //         auto it = sstInfoLevelList[targetLevel].begin();
-    //         std::advance(it, i);
-    //         std::vector<sstInfoItemProps> tmpVector = {*it};
-    //         ptrTracks.push_back(PtrTrackProps(tmpVector));
-    //         tmpMinKeyVector.push_back(tmpVector[0].minKey);
-    //         tmpMaxKeyVector.push_back(tmpVector[0].maxKey);
-    //     }
-    //     KEY_TL intervalMinKey =
-    //         *std::min_element(tmpMinKeyVector.begin(),
-    //         tmpMinKeyVector.end());
-    //     KEY_TL intervalMaxKey =
-    //         *std::max_element(tmpMaxKeyVector.begin(),
-    //         tmpMaxKeyVector.end());
-    //     FILE_NUM_TL sonLevel = targetLevel + 1;
-    //     if (sstInfoLevelList.size() - 1 >= sonLevel &&
-    //         !sstInfoLevelList[sonLevel].empty()) {
-    //         std::vector<sstInfoItemProps> tmpFileInfoList;
-    //         for (auto &sonItem : sstInfoLevelList[sonLevel]) {
-    //             if (sonItem.minKey <= intervalMaxKey &&
-    //                 sonItem.maxKey >= intervalMinKey) {
-    //                 tmpFileInfoList.push_back(sonItem);
-    //             }
-    //         }
-    //         if (!tmpFileInfoList.empty())
-    //             ptrTracks.push_back(PtrTrackProps(tmpFileInfoList));
-    //     }
-    //     // 开始归并成新文件
-    //     mergeFilesAndAddToDiskAndCache(ptrTracks, sonLevel);
-    //     // ptrTracks已组装完成，删除所有旧文件
-    //     for (auto &trackItem : ptrTracks) {
-    //         for (auto &fileInfoItem : trackItem.fileInfoList) {
-    //             deleteSSTInDisknCache(fileInfoItem.uid, targetLevel);
-    //         }
-    //     }
-    //     // 判断sonLevel的文件数是否达到上限
-    // }
+    // 判断新增sst后，第0层是否溢出
+    while (levelCache[targetLevel].size() >
+           MAX_FILE_NUM_GIVEN_LEVEL(targetLevel)) {
+        // 从level0合并
+        ptrTracks.clear();
+        KEY_TL intervalMinKey, intervalMaxKey;
+        long MinTrackIndexOfSonLevel;
+        if (!targetLevel) {
+            // 生成前3条track
+            MinTrackIndexOfSonLevel = 3;
+            std::vector<KEY_TL> tmpMinKeyVector;
+            std::vector<KEY_TL> tmpMaxKeyVector;
+            for (int i = 0; i < 3; ++i) {
+                auto it = levelCache[targetLevel].begin();
+                std::advance(it, i);
+                std::vector<sstInfoItemProps> tmpVector = {(*it).second};
+                tmpMinKeyVector.push_back(tmpVector[0].minKey);
+                tmpMaxKeyVector.push_back(tmpVector[0].maxKey);
+                ptrTracks.push_back(PtrTrackProps(tmpVector));
+            }
+            intervalMinKey = *std::min_element(tmpMinKeyVector.begin(),
+                                               tmpMinKeyVector.end());
+            intervalMaxKey = *std::max_element(tmpMaxKeyVector.begin(),
+                                               tmpMaxKeyVector.end());
+        } else {
+            // 不是第0层，则本层只需生成1条track
+            MinTrackIndexOfSonLevel = 1;
+            std::vector<sstInfoItemProps> reorderVec;
+            for (auto &item : levelCache[targetLevel]) {
+                reorderVec.push_back(item.second);
+            }
+            std::sort(reorderVec.begin(), reorderVec.end(), compareReorderVec);
+            FILE_NUM_TL fileNumToExpel = levelCache[targetLevel].size() -
+                                         MAX_FILE_NUM_GIVEN_LEVEL(targetLevel);
+            std::vector<sstInfoItemProps> tmpFileInfoList(
+                reorderVec.begin(), reorderVec.begin() + fileNumToExpel);
+            // SLIPPERY:
+            // tmpFileInfoList是放到track中去的,需要重新按key排序,若不排则为timestamp顺序
+            std::sort(tmpFileInfoList.begin(), tmpFileInfoList.end(),
+                      [](const sstInfoItemProps &a, const sstInfoItemProps &b) {
+                          return a.minKey < b.minKey;
+                      });
+            // slippery:
+            // [前后逻辑贯通]忘记做下一层的区间覆盖,忘记保证下一层区间不相交性.
+            auto minElement = *std::min_element(
+                tmpFileInfoList.begin(), tmpFileInfoList.end(),
+                [](const sstInfoItemProps &a, const sstInfoItemProps &b) {
+                    return a.minKey < b.minKey;
+                });
+            intervalMinKey = minElement.minKey;
+            auto maxElement = *std::max_element(
+                tmpFileInfoList.begin(), tmpFileInfoList.end(),
+                [](const sstInfoItemProps &a, const sstInfoItemProps &b) {
+                    return a.maxKey < b.maxKey;
+                });
+            intervalMaxKey = maxElement.maxKey;
+            if (!tmpFileInfoList.empty())
+                ptrTracks.push_back(PtrTrackProps(tmpFileInfoList));
+        }
+        // 生成第4条track
+        FILE_NUM_TL sonLevel = targetLevel + 1;
+        if (levelCache.size() - 1 >= sonLevel &&
+            !levelCache[sonLevel].empty()) {
+            std::vector<sstInfoItemProps> tmpFileInfoList;
+            for (auto &sonItem : levelCache[sonLevel]) {
+                if (sonItem.second.minKey <= intervalMaxKey &&
+                    sonItem.second.maxKey >= intervalMinKey) {
+                    tmpFileInfoList.push_back(sonItem.second);
+                }
+            }
+            if (!tmpFileInfoList.empty())
+                ptrTracks.push_back(PtrTrackProps(tmpFileInfoList));
+        }
+        // 开始归并成新文件
+        SS_TIMESTAMP_TL maxTimeStampToWrite = 0;
+        for (auto &trackItem : ptrTracks) {
+            for (auto &sstInfoItem : trackItem.fileInfoList)
+                maxTimeStampToWrite =
+                    std::max(maxTimeStampToWrite, sstInfoItem.timeStamp);
+        }
+        std::list<KEY_TL> keyList;
+        std::vector<SS_OFFSET_TL> offsetList;
+        std::vector<SS_VLEN_TL> vlenList;
+        mergeFilesAndReturnKOVList(ptrTracks, keyList, offsetList, vlenList,
+                                   targetLevel);
+        // ptrTracks已组装完成，删除所有旧文件
+        long tmpTrackIndex = -1;
+        for (auto &trackItem : ptrTracks) {
+            tmpTrackIndex++;
+            for (auto &fileInfoItem : trackItem.fileInfoList) {
+                tmpTrackIndex < MinTrackIndexOfSonLevel
+                    ? deleteSSTInDisknCache(fileInfoItem.uid, targetLevel,
+                                            fileInfoItem.minKey)
+                    : deleteSSTInDisknCache(fileInfoItem.uid, sonLevel,
+                                            fileInfoItem.minKey);
+            }
+        }
+
+#ifdef LAST_WA
+        if (!std::is_sorted(keyList.begin(), keyList.end())) {
+            auto it = std::adjacent_find(keyList.begin(), keyList.end(),
+                                         std::greater<KEY_TL>());
+            if (it != keyList.end()) {
+                std::cerr
+                    << "Error: [in Merge()] keyList is not sorted. The pair ("
+                    << *it << ", " << *(std::next(it))
+                    << ") is out of order. visitInd: " << visitInd << "\n";
+            }
+        }
+#endif
+
+        // 将本地的K/O/V list写入disk&cache
+        writeKOVListToDiskAndCache(keyList, offsetList, vlenList, sonLevel,
+                                   maxTimeStampToWrite);
+        // 判断sonLevel的文件数是否达到上限
+        targetLevel = sonLevel;
+    }
 }
 
 void KVStore::writeVlogEntry(std::ofstream &vlogFile,
@@ -419,6 +517,7 @@ KVStore::SSTEntryProps KVStore::findOffsetInSSTInfoItemPtr(
     KVStore::SSTEntryProps entry(0, CONVENTIONAL_MISS_FLAG_OFFSET, 0);
     if (!(sstInfoItemPtr->bf.query(key))) return entry;
     // start binary search
+
     int left = 0, right = (sstInfoItemPtr->kvNum) - 1;
     while (left <= right) {
         int mid = (left + right) / 2;
@@ -486,29 +585,134 @@ VLOG_CHECKSUM_TL KVStore::calcChecksum(const KEY_TL &curKey,
     fillCrcObj(crcObj, curKey, curVlen, curValue);
     return utils::crc16(crcObj);
 }
-// void KVStore::deleteSSTInDisknCache(FILE_NUM_TL uid, FILE_NUM_TL level) {
-//     // delete in sstCache & sstInfoLevelList
-//     sstCache.erase(uid);
-//     for (auto it = sstInfoLevelList[level].begin();
-//          it != sstInfoLevelList[level].end();) {
-//         if (it->uid == uid) {
-//             it = sstInfoLevelList[level].erase(it);
-//             break;
-//         } else {
-//             ++it;
-//         }
-//     }
-//     // delete in disk
-//     if (utils::rmfile(dir + SS_DIR_PATH_SUFFIX_WITHOUT_LEVELNUM +
-//                       std::to_string(level) + "/" + std::to_string(uid))) {
-//         std::cerr << "ERR: failed to delete a sst during compaction\n";
-//     }
-//     return;
-// }
+void KVStore::deleteSSTInDisknCache(FILE_NUM_TL uid, FILE_NUM_TL level,
+                                    KEY_TL minKey) {
+    // delete in levelCache & hashCachePtrByUid
+    // #ifdef WATCH
+    // if (WATCHED_FILEUID && uid == WATCHED_FILEUID) {
+    //     std::cout << "deleteing the WATCHED file...\n";
+    // }
+    // #endif
+    hashCachePtrByUid.erase(uid);
+    for (auto it = levelCache[level].begin(); it != levelCache[level].end();) {
+        if (it->first == minKey && it->second.uid == uid) {
+            it = levelCache[level].erase(it);
+        } else {
+            ++it;
+        }
+    }
+    // delete in disk
+    if (utils::rmfile(dir + SS_DIR_PATH_SUFFIX_WITHOUT_LEVELNUM +
+                      std::to_string(level) + "/" + std::to_string(uid) +
+                      SS_FILE_SUFFIX)) {
+        std::cerr << "ERR: failed to delete "
+                  << dir + SS_DIR_PATH_SUFFIX_WITHOUT_LEVELNUM +
+                         std::to_string(level) + "/" + std::to_string(uid) +
+                         SS_FILE_SUFFIX
+                  << " during compaction\n";
+    }
+    return;
+}
 
-void KVStore::mergeFilesAndReturnKeyOffsetList(
-    std::vector<PtrTrackProps> &ptrTracks,
-    std::list<std::pair<KEY_TL, SS_OFFSET_TL>>) {}
+void KVStore::mergeFilesAndReturnKOVList(std::vector<PtrTrackProps> &ptrTracks,
+                                         std::list<KEY_TL> &keyList,
+                                         std::vector<SS_OFFSET_TL> &offsetList,
+                                         std::vector<SS_VLEN_TL> &vlenList,
+                                         FILE_NUM_TL targetLevel) {
+    visitInd++;
+    std::priority_queue<TrackPointerProps, std::vector<TrackPointerProps>,
+                        CompareForPointerQueue>
+        pointerQueue;
+    size_t tmpTrackIndex = -1;
+    for (auto &trackItem : ptrTracks) {
+        tmpTrackIndex++;
+        pointerQueue.push(TrackPointerProps(0, 0, tmpTrackIndex));
+        // for (auto &itemz : trackItem.fileInfoList) {
+        // #ifdef WATCH
+        // if (WATCHED_FILEUID && itemz.uid == WATCHED_FILEUID) {
+        //     std::cout << "spotted fileuid in all merging files: "
+        //               << WATCHED_FILEUID << "\n";
+        // }
+        // #endif
+        // }
+    }
+    while (!pointerQueue.empty()) {
+        TrackPointerProps topPointer = pointerQueue.top();
+        pointerQueue.pop();
+        sstInfoItemProps *topFilePtr =
+            &(ptrTracks[topPointer.trackIndex]
+                  .fileInfoList[topPointer.fileIndex]);
+        size_t topEntryIndex = topPointer.CacheItemIndex;
+        // #ifdef WATCH
+        // if (WATCHED_FILEUID && topFilePtr->uid == WATCHED_FILEUID) {
+        //     std::cout << "spotted fileuid in topPointer: " << WATCHED_FILEUID
+        //               << "\n";
+        // }
+        // #endif
+        // 使所有可能的key相同的pointer右移
+        // slippery: 没写右移逻辑！
+        KEY_TL topKey = topFilePtr->keyList[topEntryIndex];
+        while (!pointerQueue.empty() &&
+               ptrTracks[pointerQueue.top().trackIndex]
+                       .fileInfoList[pointerQueue.top().fileIndex]
+                       .keyList[pointerQueue.top().CacheItemIndex] == topKey) {
+#ifdef WA
+            std::cout << "topTimeStamp: " << topFilePtr->timeStamp
+                      << ",expellingTimeStamp: "
+                      << ptrTracks[pointerQueue.top().trackIndex]
+                             .fileInfoList[pointerQueue.top().fileIndex]
+                             .timeStamp
+                      << "\n";
+#endif
+            TrackPointerProps expelledPointer = pointerQueue.top();
+            sstInfoItemProps *expelledFilePtr =
+                &(ptrTracks[expelledPointer.trackIndex]
+                      .fileInfoList[expelledPointer.fileIndex]);
+            bool controlFlag = 0;
+            pointerQueue.pop();
+            // update `expelledPointer`
+            expelledPointer.CacheItemIndex++;
+            if (expelledPointer.CacheItemIndex == expelledFilePtr->kvNum) {
+                // 尝试跳到该track的下一个文件
+                expelledPointer.CacheItemIndex = 0;
+                expelledPointer.fileIndex++;
+                if (ptrTracks[expelledPointer.trackIndex].fileInfoList.size() -
+                        1 >=
+                    expelledPointer.fileIndex) {
+                } else {
+                    // 该track已遍历完成，不push
+                    controlFlag = 1;
+                }
+            }
+            if (!controlFlag) pointerQueue.push(expelledPointer);
+        }
+        SS_VLEN_TL vlenToInsert = topFilePtr->vlenList[topEntryIndex];
+        bool nextLevelEmpty = levelCache.size() - 1 < targetLevel + 1 ||
+                              levelCache[targetLevel + 1].empty();
+        // if (!(!vlenToInsert && nextLevelEmpty)) {
+        if (vlenToInsert || !nextLevelEmpty) {
+            keyList.push_back(topKey);
+            offsetList.push_back(topFilePtr->offsetList[topEntryIndex]);
+            vlenList.push_back(vlenToInsert);
+        }
+
+        // update this pointer
+        topPointer.CacheItemIndex++;
+        if (topPointer.CacheItemIndex == topFilePtr->kvNum) {
+            // 尝试跳到该track的下一个文件
+            topPointer.CacheItemIndex = 0;
+            topPointer.fileIndex++;
+            if (ptrTracks[topPointer.trackIndex].fileInfoList.size() - 1 >=
+                topPointer.fileIndex) {
+            } else {
+                // 该track已遍历完成，不push
+                continue;
+            }
+        }
+        pointerQueue.push(topPointer);
+    }
+    // 优先队列已空，归并结束
+}
 
 void KVStore::writeSSTToDisk(FILE_NUM_TL level,
                              std::vector<sstInfoItemProps> &list) {
@@ -576,6 +780,21 @@ void KVStore::writeSSTToCache(FILE_NUM_TL level,
         hashCachePtrByUid[item.uid] = &((*emplaceResult).second);
     }
 }
+void KVStore::writeKOVListToDiskAndCache(std::list<KEY_TL> &keyList,
+                                         std::vector<SS_OFFSET_TL> &offsetList,
+                                         std::vector<SS_VLEN_TL> &vlenList,
+                                         FILE_NUM_TL sonLevel,
+                                         SS_TIMESTAMP_TL maxTimeStampToWrite) {
+    // 扩充过短的vector
+    if ((long)levelCache.size() - 1 < (long)sonLevel)
+        levelCache.resize(sonLevel + 1);
+
+    std::vector<sstInfoItemProps> SSTList;
+    generateSSTList(keyList, offsetList, vlenList, SSTList,
+                    maxTimeStampToWrite);
+    writeSSTToDisk(sonLevel, SSTList);
+    writeSSTToCache(sonLevel, SSTList);
+}
 // deprecated
 // void KVStore::mergeFilesAndAddToDiskAndCache(
 //     std::vector<PtrTrackProps> &ptrTracks, size_t levelToWrite) {
@@ -594,7 +813,8 @@ void KVStore::writeSSTToCache(FILE_NUM_TL level,
 //     std::vector<KEY_TL> generatedKeyList;
 //     std::vector<SS_OFFSET_TL> generatedOffsetList;
 //     std::vector<SS_VLEN_TL> generatedVlenList;
-//     std::priority_queue<TrackPointerProps, std::vector<TrackPointerProps>,
+//     std::priority_queue<TrackPointerProps,
+//     std::vector<TrackPointerProps>,
 //                         CompareForPointerQueue>
 //         pointerQueue;
 //     size_t tmpTrackIndex = -1;
@@ -629,7 +849,8 @@ void KVStore::writeSSTToCache(FILE_NUM_TL level,
 //             if (sstInfoLevelList.size() - 1 < levelToWrite)
 //                 sstInfoLevelList.resize(levelToWrite + 1);
 //             sstInfoLevelList.at(levelToWrite)
-//                 .insert(sstInfoItemProps(uidToWrite, globalTimeStampToWrite,
+//                 .insert(sstInfoItemProps(uidToWrite,
+//                 globalTimeStampToWrite,
 //                                          minElement, maxElement,
 //                                          kvNumToWrite));
 
@@ -638,8 +859,9 @@ void KVStore::writeSSTToCache(FILE_NUM_TL level,
 //             tmpCacheItemPtr->level = levelToWrite;
 //             for (int ti = 0; ti < kvNumToWrite; ti++)
 //                 tmpCacheItemPtr->keyList[ti] = generatedKeyList[ti],
-//                 tmpCacheItemPtr->offsetList[ti] = generatedOffsetList[ti],
-//                 tmpCacheItemPtr->vlenList[ti] = generatedVlenList[ti];
+//                 tmpCacheItemPtr->offsetList[ti] =
+//                 generatedOffsetList[ti], tmpCacheItemPtr->vlenList[ti] =
+//                 generatedVlenList[ti];
 //             // 生成一个BF
 
 //             sstCache[uidToWrite] = tmpCacheItemPtr;
@@ -650,11 +872,13 @@ void KVStore::writeSSTToCache(FILE_NUM_TL level,
 //         if (topPointer.CacheItemIndex == topPointer.fileKVNum) {
 //             // 尝试跳到该track的下一个文件
 //             topPointer.fileIndex++;
-//             if (ptrTracks[topPointer.trackIndex].fileInfoList.size() - 1 >=
+//             if (ptrTracks[topPointer.trackIndex].fileInfoList.size() - 1
+//             >=
 //                 topPointer.fileIndex) {
 //                 topPointer.CacheItemIndex = 0;
-//                 topPointer.fileKVNum = sstCache[topPointer.fileUid]->kvNum;
-//                 topPointer.fileUid = ptrTracks[topPointer.trackIndex]
+//                 topPointer.fileKVNum =
+//                 sstCache[topPointer.fileUid]->kvNum; topPointer.fileUid =
+//                 ptrTracks[topPointer.trackIndex]
 //                                          .fileInfoList[topPointer.fileIndex]
 //                                          .uid;
 //                 pointerQueue.push(topPointer);
@@ -757,6 +981,17 @@ void KVStore::generateSSTList(const std::list<KEY_TL> &keyList,
                             tailKVIndex = MAX_SST_KV_GROUP_NUM * i +
                                           MAX_SST_KV_GROUP_NUM - 1;
         if (tailKVIndex > totalKVNum - 1) tailKVIndex = totalKVNum - 1;
+        auto tmpIter = keyList.begin();
+        std::advance(tmpIter, headKVIndex);
+        for (SST_HEADER_KVNUM_TL ind = headKVIndex; ind <= tailKVIndex; ind++) {
+            // #ifdef WATCH
+            if (WATCHED_KEY && *tmpIter == WATCHED_KEY) {
+                std::cout << "WATCHED_KEY in sstuid: " << largestUid + 1
+                          << "\n";
+            }
+            // #endif
+            std::advance(tmpIter, 1);
+        }
         auto minIter = keyList.begin();
         std::advance(minIter, headKVIndex);
         auto maxIter = minIter;
@@ -766,6 +1001,21 @@ void KVStore::generateSSTList(const std::list<KEY_TL> &keyList,
             *std::min_element(minIter, maxIter),
             *std::max_element(minIter, maxIter), minIter,
             offsetList.begin() + headKVIndex, vlenList.begin() + headKVIndex);
+    }
+}
+
+void KVStore::printUidContainsWatchedKey() {
+    for (size_t i = 0; i < levelCache.size(); ++i) {
+        auto &level = levelCache[i];
+        for (auto itemIter = level.begin(); itemIter != level.end();
+             ++itemIter) {
+            auto &item = *itemIter;
+            for (SST_HEADER_KVNUM_TL ii = 0; ii < item.second.kvNum; ii++)
+                if (item.second.keyList[ii] == WATCHED_KEY) {
+                    std::cout << "SNAPSHOT: key in " << item.second.uid
+                              << " at level: " << i << "\n";
+                }
+        }
     }
 }
 

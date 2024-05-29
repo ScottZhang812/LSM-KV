@@ -47,6 +47,12 @@ typedef int SST_LEVEL_TL;
 #define DELETE_MARK "~DELETED~"
 #define CONVENTIONAL_MISS_FLAG_OFFSET 1
 #define MAX_FILE_NUM_GIVEN_LEVEL(level) ((FILE_NUM_TL)1 << (level + 1))
+// #define WATCHED_KEY 1122
+// #define WATCHED_KEY 65485
+#define WATCHED_KEY 0
+// #define WATCHED_FILEUID 673
+// #define WATCHED_FILEUID 3371
+#define WATCHED_FILEUID 0
 
 class KVStore : public KVStoreAPI {
    private:
@@ -144,12 +150,6 @@ class KVStore : public KVStoreAPI {
         PtrTrackProps(std::vector<sstInfoItemProps> _fileInfoList)
             : fileInfoList(std::move(_fileInfoList)) {}
     };
-    struct CompareOfSstInfo {
-        bool operator()(const sstInfoItemProps &a,
-                        const sstInfoItemProps &b) const {
-            return a.minKey < b.minKey;
-        }
-    };
     // for cache
     // static std::unordered_map<FILE_NUM_TL, CacheItemProps *>
     //     sstCache;  // map `uid` to `cacheItem`
@@ -157,35 +157,36 @@ class KVStore : public KVStoreAPI {
         hashCachePtrByUid;  // map `uid` to cachePtr
     std::vector<std::multimap<KEY_TL, sstInfoItemProps>>
         levelCache;  // slippery. Ordered by: minKey
+    static std::vector<PtrTrackProps> ptrTracks;
     // for priority_queue
     struct TrackPointerProps {
         FILE_NUM_TL fileIndex;
         size_t CacheItemIndex;
-        FILE_NUM_TL fileUid;  // dependent to `fileIndex`
-        SST_HEADER_KVNUM_TL fileKVNum;
         size_t trackIndex;
 
         TrackPointerProps(FILE_NUM_TL _fileIndex, size_t _CacheItemIndex,
-                          FILE_NUM_TL _fileUid, SST_HEADER_KVNUM_TL _fileKVNum,
                           size_t _trackIndex)
             : fileIndex(_fileIndex),
               CacheItemIndex(_CacheItemIndex),
-              fileUid(_fileUid),
-              fileKVNum(_fileKVNum),
               trackIndex(_trackIndex) {}
     };
-    // struct CompareForPointerQueue {
-    //     // to get minimum, just define `>`
-    //     bool operator()(const TrackPointerProps &a,
-    //                     const TrackPointerProps &b) const {
-    //         KEY_TL keya = ((sstCache[a.fileUid])->keyList)[a.CacheItemIndex],
-    //                keyb = ((sstCache[b.fileUid])->keyList)[b.CacheItemIndex];
-    //         if (keya > keyb) return true;
-    //         if (keya < keyb) return false;
-    //         // keya == keyb
-    //         return a.
-    //     }
-    // };
+    struct CompareForPointerQueue {
+        // to get minimum, just define `>`
+        bool operator()(const TrackPointerProps &a,
+                        const TrackPointerProps &b) const {
+            KEY_TL keya = ptrTracks[a.trackIndex]
+                              .fileInfoList[a.fileIndex]
+                              .keyList[a.CacheItemIndex],
+                   keyb = ptrTracks[b.trackIndex]
+                              .fileInfoList[b.fileIndex]
+                              .keyList[b.CacheItemIndex];
+            if (keya > keyb) return true;
+            if (keya < keyb) return false;
+            // keya == keyb
+            return ptrTracks[a.trackIndex].fileInfoList[a.fileIndex].timeStamp <
+                   ptrTracks[b.trackIndex].fileInfoList[b.fileIndex].timeStamp;
+        }
+    };
 
     void clearMemTable() {
         if (memTable) delete memTable;
@@ -229,12 +230,13 @@ class KVStore : public KVStoreAPI {
     VLOG_CHECKSUM_TL calcChecksum(const KEY_TL &curKey,
                                   const SS_VLEN_TL &curVlen,
                                   const std::string &curValue);
-    void deleteSSTInDisknCache(FILE_NUM_TL uid, FILE_NUM_TL level);
-    void mergeFilesAndAddToDiskAndCache(std::vector<PtrTrackProps> &ptrTracks,
-                                        size_t levelToWrite);
-    void mergeFilesAndReturnKeyOffsetList(
-        std::vector<PtrTrackProps> &ptrTracks,
-        std::list<std::pair<KEY_TL, SS_OFFSET_TL>>);
+    void deleteSSTInDisknCache(FILE_NUM_TL uid, FILE_NUM_TL level,
+                               KEY_TL minKey);
+    void mergeFilesAndReturnKOVList(std::vector<PtrTrackProps> &ptrTracks,
+                                    std::list<KEY_TL> &keyList,
+                                    std::vector<SS_OFFSET_TL> &offsetList,
+                                    std::vector<SS_VLEN_TL> &vlenList,
+                                    FILE_NUM_TL targetLevel);
     void simpleConvertMemTable2File();
     void generateSSTList(const std::list<KEY_TL> &keyList,
                          const std::vector<SS_OFFSET_TL> &offsetList,
@@ -244,12 +246,44 @@ class KVStore : public KVStoreAPI {
     void writeSSTToDisk(FILE_NUM_TL level, std::vector<sstInfoItemProps> &list);
     void writeSSTToCache(FILE_NUM_TL level,
                          std::vector<sstInfoItemProps> &list);
+    void writeKOVListToDiskAndCache(std::list<KEY_TL> &keyList,
+                                    std::vector<SS_OFFSET_TL> &offsetList,
+                                    std::vector<SS_VLEN_TL> &vlenList,
+                                    FILE_NUM_TL sonLevel,
+                                    SS_TIMESTAMP_TL maxTimeStampToWrite);
     /*
      *debug utils and less important utils
      */
     void printSST(SST_LEVEL_TL level, FILE_NUM_TL uid);
     void printSSTCache(SST_LEVEL_TL level, FILE_NUM_TL uid);
+    void printUidContainsWatchedKey();
     bool checkTailCandidateValidity(int candidate);
+    static bool compareReorderVec(const sstInfoItemProps &a,
+                                  const sstInfoItemProps &b) {
+        if (a.timeStamp < b.timeStamp) return true;
+        if (a.timeStamp > b.timeStamp) return false;
+        return a.minKey < b.minKey;
+    }
     SS_OFFSET_TL getHead() { return head; }
     SS_OFFSET_TL getTail() { return tail; }
+    void printQueue(
+        std::priority_queue<TrackPointerProps, std::vector<TrackPointerProps>,
+                            CompareForPointerQueue> &pointerQueue) {
+        std::cout << "\\";
+        while (!pointerQueue.empty()) {
+            TrackPointerProps top = pointerQueue.top();
+            std::cout << "Key: "
+                      << ptrTracks[top.trackIndex]
+                             .fileInfoList[top.fileIndex]
+                             .keyList[top.CacheItemIndex]
+                      << ", Timestamp: "
+                      << ptrTracks[top.trackIndex]
+                             .fileInfoList[top.fileIndex]
+                             .timeStamp
+                      << " - ";
+            pointerQueue.pop();
+        }
+        std::cout << "//";
+        fflush(stdout);
+    }
 };
