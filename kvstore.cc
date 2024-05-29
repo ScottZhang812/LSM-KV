@@ -466,8 +466,11 @@ void KVStore::readFileNGetFileItem(std::string filePath,
     SSTHeaderProps headerProps;
     readHeaderPropsFromSST(file, headerProps);
     fileItem.kvNum = headerProps.kvNum;
+    fileItem.timeStamp = headerProps.timestamp;
+    fileItem.minKey = headerProps.minKey;
+    fileItem.maxKey = headerProps.maxKey;
     // read 3 lists
-    for (int i = 0; i < fileItem.kvNum; i++) {
+    for (SST_HEADER_KVNUM_TL i = 0; i < fileItem.kvNum; i++) {
         SSTEntryProps entry;
         readEntryFromSST(file, entry, i);
         fileItem.keyList[i] = entry.key;
@@ -631,9 +634,10 @@ void KVStore::mergeFilesAndReturnKOVList(std::vector<PtrTrackProps> &ptrTracks,
     std::priority_queue<TrackPointerProps, std::vector<TrackPointerProps>,
                         CompareForPointerQueue>
         pointerQueue;
-    size_t tmpTrackIndex = -1;
-    for (auto &trackItem : ptrTracks) {
-        tmpTrackIndex++;
+    // size_t tmpTrackIndex = -1;
+    for (size_t tmpTrackIndex = 0; tmpTrackIndex < ptrTracks.size();
+         tmpTrackIndex++) {
+        // tmpTrackIndex++;
         pointerQueue.push(TrackPointerProps(0, 0, tmpTrackIndex));
         // for (auto &itemz : trackItem.fileInfoList) {
         // #ifdef WATCH
@@ -824,6 +828,21 @@ void KVStore::examineOld() {
                 std::string curFilePath = dirPath + "/" + fileNameList[j];
                 sstInfoItemProps fileItem;
                 readFileNGetFileItem(curFilePath, fileItem);
+
+                std::string::size_type suffix_pos =
+                    fileNameList[j].rfind(SS_FILE_SUFFIX);
+                if (suffix_pos != std::string::npos) {
+                    std::string numStr = fileNameList[j].substr(0, suffix_pos);
+                    FILE_NUM_TL num =
+                        static_cast<FILE_NUM_TL>(std::stoi(numStr));
+                    largestUid = std::max(largestUid, num);
+                    fileItem.uid = num;
+                }
+
+                largestTimeStamp =
+                    std::max(largestTimeStamp, fileItem.timeStamp);
+                if ((long)levelCache.size() - 1 < (long)curLevel)
+                    levelCache.resize(curLevel + 1);
                 auto insertResult = levelCache[curLevel].insert(
                     std::make_pair(fileItem.minKey, fileItem));
                 hashCachePtrByUid[fileItem.uid] = &insertResult->second;
