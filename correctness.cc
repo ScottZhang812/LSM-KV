@@ -147,6 +147,9 @@ class CorrectnessTest : public Test {
         }
 
         phase();
+#ifdef DET_TEST
+        std::cout << "TEST: Gettting differently\n";
+#endif
 
         for (i = 0; i < max; ++i) {
             switch (i % 3) {
@@ -166,6 +169,9 @@ class CorrectnessTest : public Test {
 
         phase();
 
+#ifdef DET_TEST
+        std::cout << "TEST: Del/Get/Del/Get differently\n";
+#endif
         for (i = 1; i < max; i += 2) {
             EXPECT(true, store.del(i));
 
