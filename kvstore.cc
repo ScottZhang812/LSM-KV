@@ -14,17 +14,16 @@ std::vector<KVStore::PtrTrackProps> KVStore::ptrTracks;
 KVStore::KVStore(const std::string &dir, const std::string &vlog)
     : KVStoreAPI(dir, vlog) {
     memTable = new skiplist_type();
-
-    // TODO: 设置head/tail的值. Belows are temps
     head = 0;
     tail = 0;
     largestUid = 0;
     largestTimeStamp = 0;
-
-    // 胡乱写的
-    ptrTracks.clear();
+    // 根据之前遗留数据，调整head / tail / largestUid / largestTimeStamp
+    examineOld();
 }
-KVStore::~KVStore() {}
+KVStore::~KVStore() {
+    if (memTable->getLength()) convertAndWriteMemTable();
+}
 
 /**
  * Insert/Update the key-value pair.
@@ -170,7 +169,8 @@ void KVStore::reset() {
 void KVStore::scan(uint64_t key1, uint64_t key2,
                    std::list<std::pair<uint64_t, std::string>> &list) {
     list.clear();
-    memTable->scan(key1, key2, list);
+    for (KEY_TL i = key1; i <= key2; i++)
+        list.push_back(std::make_pair(i, get(i)));
 }
 
 /**
@@ -259,10 +259,6 @@ void KVStore::convertAndWriteMemTable() {
     std::vector<SS_OFFSET_TL> offsetList;
     std::vector<SS_VLEN_TL> vlenList;
     memTable->scan(0, std::numeric_limits<uint64_t>::max(), list);
-
-    if (memTable->get(WATCHED_GC_KEY)) {
-        std::cout << "\n";
-    }
 
     for (const auto &item : list) {
         VLOG_MAGIC_TL magic = 0xff;  // i.e. VLOG_MAGIC_TL
@@ -457,36 +453,29 @@ void KVStore::writeSSTEntry(std::ofstream &sstFile, const KEY_TL &key,
     sstFile.write(reinterpret_cast<const char *>(&vlen), sizeof(vlen));
 }
 
-KVStore::CacheItemProps *KVStore::readFileNGetCacheItem(SST_LEVEL_TL level,
-                                                        FILE_NUM_TL uid) {
-    std::stringstream ss;
-    ss << dir << "/" << SS_DIR_PATH_SUFFIX_WITHOUT_LEVELNUM << level << "/"
-       << uid << SS_FILE_SUFFIX;
-    std::string filePath = ss.str();
+void KVStore::readFileNGetFileItem(std::string filePath,
+                                   sstInfoItemProps &fileItem) {
     std::ifstream file(filePath, std::ios::binary);
     if (!file) {
         std::cerr << "Failed to open file: " << filePath << std::endl;
-        return nullptr;
+        return;
     }
-    CacheItemProps *cacheItemPtr = new CacheItemProps();
     // read bf
-    readBFFromSST(file, cacheItemPtr->bf);
+    readBFFromSST(file, fileItem.bf);
     // read kvNum&level
     SSTHeaderProps headerProps;
     readHeaderPropsFromSST(file, headerProps);
-    cacheItemPtr->kvNum = headerProps.kvNum;
-    cacheItemPtr->level = level;
+    fileItem.kvNum = headerProps.kvNum;
     // read 3 lists
-    for (int i = 0; i < cacheItemPtr->kvNum; i++) {
+    for (int i = 0; i < fileItem.kvNum; i++) {
         SSTEntryProps entry;
         readEntryFromSST(file, entry, i);
-        cacheItemPtr->keyList[i] = entry.key;
-        cacheItemPtr->offsetList[i] = entry.offset;
-        cacheItemPtr->vlenList[i] = entry.vlen;
+        fileItem.keyList[i] = entry.key;
+        fileItem.offsetList[i] = entry.offset;
+        fileItem.vlenList[i] = entry.vlen;
     }
 
     file.close();
-    return cacheItemPtr;
 }
 
 void KVStore::readHeaderPropsFromSST(std::ifstream &file,
@@ -814,100 +803,54 @@ void KVStore::writeKOVListToDiskAndCache(std::list<KEY_TL> &keyList,
     writeSSTToDisk(sonLevel, SSTList);
     writeSSTToCache(sonLevel, SSTList);
 }
-// deprecated
-// void KVStore::mergeFilesAndAddToDiskAndCache(
-//     std::vector<PtrTrackProps> &ptrTracks, size_t levelToWrite) {
-//     size_t trackNum = ptrTracks.size();
-//     size_t finishedTrackNum = 0;
-//     SS_TIMESTAMP_TL globalTimeStampToWrite = 0;  // 后面无需维护
-//     for (auto &trackItem : ptrTracks) {
-//         for (auto &sstInfoItem : trackItem.fileInfoList)
-//             globalTimeStampToWrite =
-//                 std::max(globalTimeStampToWrite, sstInfoItem.timeStamp);
-//     }
+void KVStore::examineOld() {
+    std::vector<std::string> nameList;
+    int fileNum = utils::scanDir(dir, nameList);
+    for (int i = 0; i < fileNum; i++) {
+        std::string curName = nameList[i];
+        int curLevel = 0;
+        std::string dirPath = dir + "/" + curName;
+        std::size_t pos = curName.find_last_of('-');
+        if (pos != std::string::npos) {
+            std::string levelStr = curName.substr(pos + 1);
+            curLevel = std::stoi(levelStr);
+        }
+        if (utils::dirExists(dirPath)) {
+            // it is a directory
+            // examineSSTToCacheAndLargestVars
+            std::vector<std::string> fileNameList;
+            int secondFileNum = utils::scanDir(dirPath, fileNameList);
+            for (int j = 0; j < secondFileNum; j++) {
+                std::string curFilePath = dirPath + "/" + fileNameList[j];
+                sstInfoItemProps fileItem;
+                readFileNGetFileItem(curFilePath, fileItem);
+                auto insertResult = levelCache[curLevel].insert(
+                    std::make_pair(fileItem.minKey, fileItem));
+                hashCachePtrByUid[fileItem.uid] = &insertResult->second;
+            }
+        } else {
+            // it is a file.
+            // examineVlogToHeadAndTail
+            std::ifstream vlogFile(dirPath, std::ifstream::binary);
+            if (!vlogFile.is_open()) {
+                // handle error
+            }
+            head = vlogFile.tellg();
+            SS_OFFSET_TL afterHoleOffset =
+                utils::seek_data_block(dirPath.c_str());
+            SS_OFFSET_TL tailCandidate = afterHoleOffset;
+            moveToFirstMagicPos(vlogFile, tailCandidate);
+            if (tailCandidate == head) return;
 
-//     FILE_NUM_TL uidToWrite = ++largestUid;
-//     SST_HEADER_KVNUM_TL kvNumToWrite =
-//         0;  // 一般是memTableLenThreshold，除了最后一个生成的sst
-//     std::vector<KEY_TL> generatedKeyList;
-//     std::vector<SS_OFFSET_TL> generatedOffsetList;
-//     std::vector<SS_VLEN_TL> generatedVlenList;
-//     std::priority_queue<TrackPointerProps,
-//     std::vector<TrackPointerProps>,
-//                         CompareForPointerQueue>
-//         pointerQueue;
-//     size_t tmpTrackIndex = -1;
-//     for (auto &trackItem : ptrTracks) {
-//         tmpTrackIndex++;
-//         pointerQueue.push(TrackPointerProps(0, 0,
-//         trackItem.fileInfoList[0].uid,
-//                                             trackItem.fileInfoList[0].kvNum,
-//                                             tmpTrackIndex));
-//     }
-//     while (finishedTrackNum < trackNum) {
-//         TrackPointerProps topPointer = pointerQueue.top();
-//         pointerQueue.pop();
-//         // 根据topPointer的信息，在SST中尝试新增一项
-//         if (kvNumToWrite + 1 <= memTableLenThreshold) {
-//             kvNumToWrite++;
-//             generatedKeyList.push_back(
-//                 sstCache[topPointer.fileUid]
-//                     ->keyList[topPointer.CacheItemIndex]);
-//             generatedOffsetList.push_back(
-//                 sstCache[topPointer.fileUid]
-//                     ->offsetList[topPointer.CacheItemIndex]);
-//             generatedVlenList.push_back(
-//                 sstCache[topPointer.fileUid]
-//                     ->vlenList[topPointer.CacheItemIndex]);
-//         } else {
-//             // sst已满，开始落盘
-//             auto minElement = *std::min_element(generatedKeyList.begin(),
-//                                                 generatedKeyList.end());
-//             auto maxElement = *std::max_element(generatedKeyList.begin(),
-//                                                 generatedKeyList.end());
-//             if (sstInfoLevelList.size() - 1 < levelToWrite)
-//                 sstInfoLevelList.resize(levelToWrite + 1);
-//             sstInfoLevelList.at(levelToWrite)
-//                 .insert(sstInfoItemProps(uidToWrite,
-//                 globalTimeStampToWrite,
-//                                          minElement, maxElement,
-//                                          kvNumToWrite));
-
-//             CacheItemProps *tmpCacheItemPtr = new CacheItemProps();
-//             tmpCacheItemPtr->kvNum = kvNumToWrite;
-//             tmpCacheItemPtr->level = levelToWrite;
-//             for (int ti = 0; ti < kvNumToWrite; ti++)
-//                 tmpCacheItemPtr->keyList[ti] = generatedKeyList[ti],
-//                 tmpCacheItemPtr->offsetList[ti] =
-//                 generatedOffsetList[ti], tmpCacheItemPtr->vlenList[ti] =
-//                 generatedVlenList[ti];
-//             // 生成一个BF
-
-//             sstCache[uidToWrite] = tmpCacheItemPtr;
-//         }
-
-//         // update this pointer
-//         topPointer.CacheItemIndex++;
-//         if (topPointer.CacheItemIndex == topPointer.fileKVNum) {
-//             // 尝试跳到该track的下一个文件
-//             topPointer.fileIndex++;
-//             if (ptrTracks[topPointer.trackIndex].fileInfoList.size() - 1
-//             >=
-//                 topPointer.fileIndex) {
-//                 topPointer.CacheItemIndex = 0;
-//                 topPointer.fileKVNum =
-//                 sstCache[topPointer.fileUid]->kvNum; topPointer.fileUid =
-//                 ptrTracks[topPointer.trackIndex]
-//                                          .fileInfoList[topPointer.fileIndex]
-//                                          .uid;
-//                 pointerQueue.push(topPointer);
-//             } else {
-//                 // 该track已遍历完成
-//                 finishedTrackNum++;
-//             }
-//         }
-//     }
-// }
+            // tailCandidate
+            while (!checkTailCandidateValidity(tailCandidate)) {
+                moveToFirstMagicPos(vlogFile, ++tailCandidate);
+                if (tailCandidate == head) return;
+            }
+            tail = tailCandidate;
+        }
+    }
+}
 
 /*
  *debug utils and less important utils
@@ -1034,7 +977,8 @@ void KVStore::printUidContainsWatchedKey() {
                 if (item.second.keyList[ii] == WATCHED_GC_KEY) {
                     std::cout << "SNAPSHOT: key in " << item.second.uid
                               << " at level: " << i << "\n";
-                    for (int zz = 0; zz < item.second.kvNum; zz++) {
+                    for (SST_HEADER_KVNUM_TL zz = 0; zz < item.second.kvNum;
+                         zz++) {
                         if (item.second.keyList[zz] == WATCHED_GC_KEY) {
                             std::cout << "[" << item.second.keyList[zz] << ", "
                                       << item.second.offsetList[zz] << ", "

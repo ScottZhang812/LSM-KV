@@ -136,6 +136,7 @@ class KVStore : public KVStoreAPI {
                 _keyList++;
             }
         }
+        sstInfoItemProps() : bf() {}
         sstInfoItemProps(const sstInfoItemProps &other)
             : uid(other.uid),
               timeStamp(other.timeStamp),
@@ -230,8 +231,7 @@ class KVStore : public KVStoreAPI {
                         const SS_VLEN_TL &vlen, const VALUE_TL &val);
     void writeSSTEntry(std::ofstream &sstFile, const KEY_TL &key,
                        const SS_OFFSET_TL &offset, const SS_VLEN_TL &vlen);
-    void addToCache(FILE_NUM_TL uid, CacheItemProps *cacheItemPtr);
-    CacheItemProps *readFileNGetCacheItem(SST_LEVEL_TL level, FILE_NUM_TL uid);
+    void readFileNGetFileItem(std::string filePath, sstInfoItemProps &fileItem);
     void readHeaderPropsFromSST(std::ifstream &file,
                                 SSTHeaderProps &headerProps);
     void readBFFromSST(std::ifstream &file, BF &bf);
@@ -257,7 +257,6 @@ class KVStore : public KVStoreAPI {
                                     std::vector<SS_OFFSET_TL> &offsetList,
                                     std::vector<SS_VLEN_TL> &vlenList,
                                     FILE_NUM_TL targetLevel);
-    void simpleConvertMemTable2File();
     void generateSSTList(const std::list<KEY_TL> &keyList,
                          const std::vector<SS_OFFSET_TL> &offsetList,
                          const std::vector<SS_VLEN_TL> &vlenList,
@@ -271,6 +270,7 @@ class KVStore : public KVStoreAPI {
                                     std::vector<SS_VLEN_TL> &vlenList,
                                     FILE_NUM_TL sonLevel,
                                     SS_TIMESTAMP_TL maxTimeStampToWrite);
+    void examineOld();
     /*
      *debug utils and less important utils
      */
@@ -307,4 +307,15 @@ class KVStore : public KVStoreAPI {
         fflush(stdout);
     }
     void lookInMemtable(FILE_NUM_TL uid);
+    void moveToFirstMagicPos(std::ifstream &vlogFile,
+                             SS_OFFSET_TL &tailCandidate) {
+        if (tailCandidate == head) return;
+        VLOG_MAGIC_TL tmpMagic;
+        readDataFromVlog(vlogFile, tmpMagic, tailCandidate++);
+        while (tmpMagic != VLOG_DEFAULT_MAGIC_VAL) {
+            readDataFromVlog(vlogFile, tmpMagic, tailCandidate++);
+            if (tailCandidate == head) return;
+        }
+        tailCandidate--;
+    }
 };
