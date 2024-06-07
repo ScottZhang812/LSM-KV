@@ -13,54 +13,14 @@
 #include "bloomfilter.h"
 #include "kvstore_api.h"
 #include "skiplist.h"
+#include "type.h"
 #include "utils.h"
 using namespace skiplist;
 
-typedef uint64_t KEY_TL;  // TL means 'type for LSM'
-typedef std::string VALUE_TL;
-typedef uint64_t SS_OFFSET_TL;
-typedef uint32_t SS_VLEN_TL;
-typedef uint8_t VLOG_MAGIC_TL;
-typedef uint16_t VLOG_CHECKSUM_TL;
-typedef uint64_t FILE_NUM_TL;
-typedef FILE_NUM_TL SS_TIMESTAMP_TL;
-typedef uint64_t SST_HEADER_KVNUM_TL;
-typedef int SST_LEVEL_TL;
-
-#define SS_HEADER_BYTENUM 32
-#define SS_BLOOM_BYTENUM 8192  // There are 3 consts related in total
-#define SS_KEY_BYTENUM sizeof(KEY_TL)
-#define SS_OFFSET_BYTENUM sizeof(SS_OFFSET_TL)
-#define SS_VLEN_BYTENUM sizeof(SS_VLEN_TL)
-#define DEFAULT_M_VAL 65536
-#define SS_MAX_FILE_BYTENUM 16384  // 16 * 1024
-#define SS_TIMESTAMP_BYTENUM sizeof(SS_TIMESTAMP_TL)
-#define SS_KVNUM_BYTENUM sizeof(SST_HEADER_KVNUM_TL)
-#define VLOG_MAGIC_BYTENUM sizeof(VLOG_MAGIC_TL)
-#define VLOG_CHECKSUM_BYTENUM sizeof(VLOG_CHECKSUM_TL)
-#define SS_FILE_SUFFIX ".sst"
-#define VLOG_DEFAULT_MAGIC_VAL 0xff
-#define SS_DIR_PATH_SUFFIX_WITHOUT_LEVELNUM "/level-"
-#define MAX_SST_KV_GROUP_NUM 408  // actually same as memTableLenThreshold
-#define MAX_CACHE_ENTRIES 1000000
-#define SS_ENTRY_BYTENUM (SS_KEY_BYTENUM + SS_OFFSET_BYTENUM + SS_VLEN_BYTENUM)
-#define DELETE_MARK "~DELETED~"
-#define CONVENTIONAL_MISS_FLAG_OFFSET 1
-#define MAX_FILE_NUM_GIVEN_LEVEL(level) ((FILE_NUM_TL)1 << (level + 1))
-// #define WATCHED_KEY 1122
-// #define WATCHED_KEY 65485
-
-// #define WATCHED_KEY 4590
-// #define WATCHED_GC_KEY 4590
-
-#define WATCHED_KEY 0
-#define WATCHED_GC_KEY 0
-// #define WATCHED_FILEUID 673
-// #define WATCHED_FILEUID 3371
-#define WATCHED_FILEUID 0
-
 class KVStore : public KVStoreAPI {
    private:
+    std::string dir;
+    std::string vlog;
     // for vlog
     SS_OFFSET_TL head;
     SS_OFFSET_TL tail;
@@ -70,6 +30,7 @@ class KVStore : public KVStoreAPI {
     const int memTableLenThreshold =
         (SS_MAX_FILE_BYTENUM - SS_HEADER_BYTENUM - SS_BLOOM_BYTENUM) /
         (SS_KEY_BYTENUM + SS_OFFSET_BYTENUM + SS_VLEN_BYTENUM);
+    const int OPTION_1 = 0;
     skiplist_type *memTable;
 
    public:
@@ -157,8 +118,6 @@ class KVStore : public KVStoreAPI {
             : fileInfoList(std::move(_fileInfoList)) {}
     };
     // for cache
-    // static std::unordered_map<FILE_NUM_TL, CacheItemProps *>
-    //     sstCache;  // map `uid` to `cacheItem`
     std::unordered_map<FILE_NUM_TL, sstInfoItemProps *>
         hashCachePtrByUid;  // map `uid` to cachePtr
     std::vector<std::multimap<KEY_TL, sstInfoItemProps>>
@@ -196,7 +155,7 @@ class KVStore : public KVStoreAPI {
                    ptrTracks[b.trackIndex]
                        .fileInfoList[b.fileIndex]
                        .offsetList[b.CacheItemIndex];
-            // SLIPPERY: 我把timestamp改成了uid，尝试一下
+            // SLIPPERY: 若不看offset，而根据uid/timestamp，可能存在反例
             SS_TIMESTAMP_TL
             timestampA =
                 ptrTracks[a.trackIndex].fileInfoList[a.fileIndex].timeStamp,
@@ -216,7 +175,8 @@ class KVStore : public KVStoreAPI {
     void convertAndWriteMemTable();
 
     void put(uint64_t key, const std::string &s) override;
-    std::string get(uint64_t key, SS_OFFSET_TL *userOffsetPtr = nullptr);
+    std::string get(uint64_t key);
+    void getOffset(uint64_t key, SS_OFFSET_TL *userOffsetPtr);
     bool del(uint64_t key) override;
     void reset() override;
     void scan(uint64_t key1, uint64_t key2,
@@ -224,6 +184,8 @@ class KVStore : public KVStoreAPI {
     void gc(uint64_t chunk_size) override;
 
     // utils
+    void getValueOrOffset(uint64_t key, std::string &userStr,
+                          SS_OFFSET_TL *userOffsetPtr = nullptr);
     void fillCrcObj(std::vector<unsigned char> &crcObj, KEY_TYPE key,
                     VLEN_TYPE vlen, const VALUE_TYPE &value);
     void writeVlogEntry(std::ofstream &vlogFile, const VLOG_MAGIC_TL &magic,
@@ -306,7 +268,7 @@ class KVStore : public KVStoreAPI {
         std::cout << "//";
         fflush(stdout);
     }
-    void lookInMemtable(FILE_NUM_TL uid);
+    void lookInMemtable(KEY_TL key);
     void moveToFirstMagicPos(std::ifstream &vlogFile,
                              SS_OFFSET_TL &tailCandidate) {
         if (tailCandidate == head) return;
@@ -317,5 +279,19 @@ class KVStore : public KVStoreAPI {
             if (tailCandidate == head) return;
         }
         tailCandidate--;
+    }
+    bool enableCache = true;
+    bool enableBf = true;
+    void disableCache() {
+        enableCache = false;
+        enableBf = true;
+    }
+    void enableIndexCache() {
+        enableCache = true;
+        enableBf = false;
+    }
+    void enableBloomFilterCache() {
+        enableCache = true;
+        enableBf = true;
     }
 };

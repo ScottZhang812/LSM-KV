@@ -1,0 +1,43 @@
+
+LINK.o = $(LINK.cc)
+CXXFLAGS = -std=c++20 -Wall -g
+
+all: correctness persistence speed
+
+correctness: skiplist.o kvstore.o correctness.o
+
+persistence: skiplist.o kvstore.o persistence.o
+
+./tst/speed.o: ./tst/speed.cc
+	g++ -c $< -o $@
+
+speed: skiplist.o kvstore.o ./tst/speed.o
+	g++ $^ -o $@
+
+clean:
+	-rm -f correctness persistence speed *.o ./tst/speed.o
+
+# LINK.o = $(LINK.cc)
+# CXXFLAGS = -std=c++20 -Wall -g
+
+# all: correctness persistence speed test
+
+# correctness: skiplist.o kvstore.o correctness.o
+
+# persistence: skiplist.o kvstore.o persistence.o
+
+# ./tst/speed.o: ./tst/speed.cc
+# 	g++ -c $< -o $@
+
+# speed: skiplist.o kvstore.o ./tst/speed.o
+# 	g++ $^ -o $@
+
+# # Add rules for kvstore_test
+# ./tst/kvstore_test.o: ./tst/kvstore_test.cc
+# 	g++ -c $< -o $@ -I. -I./tst
+
+# test: skiplist.o kvstore.o ./tst/kvstore_test.o
+# 	g++ $^ -o $@ /usr/lib/libgtest.a /usr/lib/libgtest_main.a -lpthread
+
+# clean:
+# 	-rm -f correctness persistence speed test *.o ./tst/speed.o ./tst/kvstore_test.o

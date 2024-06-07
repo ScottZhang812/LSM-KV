@@ -40,6 +40,20 @@ class skiplist_type {
     void scan(uint64_t key1, uint64_t key2,
               std::list<std::pair<uint64_t, std::string>> &list);
     // std::string get(key_type key) const;
+    void scanRange(uint64_t key1, uint64_t key2,
+                   std::list<std::pair<uint64_t, std::string>> &list) {
+        SkipListNode *x = head;
+        for (int i = level; i >= 0; i--) {
+            while (x->forward[i]->key < key1) {
+                x = x->forward[i];
+            }
+            SkipListNode *y = x->forward[i];
+            while (y->key >= key1 && y->key <= key2) {
+                list.emplace_back(y->key, y->value);
+                y = y->forward[i];
+            }
+        }
+    };
 };
 
 }  // namespace skiplist

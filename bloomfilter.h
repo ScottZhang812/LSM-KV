@@ -1,10 +1,7 @@
 #include <iostream>
 
 #include "MurmurHash3.h"
-#define DEFAULT_HASHFUN_NUM 1
-#define DEFAULT_M_VAL \
-    65536  // repeat with SS_BLOOM_BYTENUM. There are 3 consts related in total
-           // (include self)
+#include "type.h"
 
 class BF {
    public:

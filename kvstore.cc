@@ -12,7 +12,7 @@ long visitInd = 0;
 
 std::vector<KVStore::PtrTrackProps> KVStore::ptrTracks;
 KVStore::KVStore(const std::string &dir, const std::string &vlog)
-    : KVStoreAPI(dir, vlog) {
+    :  KVStoreAPI(dir, vlog),dir(dir), vlog(vlog) {
     memTable = new skiplist_type();
     head = 0;
     tail = 0;
@@ -23,6 +23,8 @@ KVStore::KVStore(const std::string &dir, const std::string &vlog)
 }
 KVStore::~KVStore() {
     if (memTable->getLength()) convertAndWriteMemTable();
+    // slippery: 防止内存泄漏
+    if (memTable) delete memTable;
 }
 
 /**
@@ -40,8 +42,8 @@ void KVStore::put(uint64_t key, const std::string &s) {
             // memTable overflow, don't insert now
             // #ifdef DET
             //             std::cout << "memtable is full. Start to convert to
-            //             sst.\n"
-            //                       << "At 'key'=" << key << std::endl;
+            //                          sst.\n " << " At 'key' = " << key <<
+            //                          std::endl;
             // #endif
             convertAndWriteMemTable();
             clearMemTable();
@@ -52,77 +54,25 @@ void KVStore::put(uint64_t key, const std::string &s) {
 /**
  * Returns the (string) value of the given key.
  * An empty string indicates not found.
- * userOffsetPtr用于复用本函数，用于返回一个offset给gc()，便于校验是否为最新数据
  */
-std::string KVStore::get(uint64_t key, SS_OFFSET_TL *userOffsetPtr) {
-    std::optional<std::string> res = memTable->get(key);
-    if (res.has_value()) return res.value() != DELETE_MARK ? res.value() : "";
-    // #ifdef DET
-    //     std::cout << "memtable miss. Go to SST to find " << key << "\n";
-    // #endif
-    // cannot find in Memtable
-    for (size_t i = 0; i < levelCache.size(); ++i) {
-        auto &level = levelCache[i];
-        SS_TIMESTAMP_TL maxTimeStamp = 0;
-        VALUE_TL ans = "";
-        SS_OFFSET_TL offsetAns = CONVENTIONAL_MISS_FLAG_OFFSET;
-        for (auto itemIter = level.begin(); itemIter != level.end();
-             ++itemIter) {
-            auto &item = *itemIter;
-            if (key < item.second.minKey || key > item.second.maxKey) continue;
-            FILE_NUM_TL curUid = item.second.uid;
-            sstInfoItemProps *sstInfoItemPtr = hashCachePtrByUid[curUid];
-            SSTEntryProps offsetRes =
-                findOffsetInSSTInfoItemPtr(sstInfoItemPtr, key);
-            if (offsetRes.offset == CONVENTIONAL_MISS_FLAG_OFFSET) {
-                // not found in this SST
-            } else {
-                // found in this SST
-                if (!offsetRes.vlen) {
-                    if (sstInfoItemPtr->timeStamp > maxTimeStamp) {
-                        maxTimeStamp = sstInfoItemPtr->timeStamp;
-                        ans = "";
-                        offsetAns = offsetRes.offset;
-                    }
-                } else {
-                    if (sstInfoItemPtr->timeStamp > maxTimeStamp) {
-                        maxTimeStamp = sstInfoItemPtr->timeStamp;
-                        ans = getValueByOffsetnVlen(offsetRes.offset,
-                                                    offsetRes.vlen);
-                        offsetAns = offsetRes.offset;
-                    }
-                }
-            }
-        }
-        if (maxTimeStamp) {
-            // found at least one entry
-            if (userOffsetPtr != nullptr) {
-                if (offsetAns != CONVENTIONAL_MISS_FLAG_OFFSET)
-                    *userOffsetPtr = offsetAns;
-#ifdef DET
-                std::cout << "return empty because only needs offset\n";
-#endif
-                return "";
-            } else
-                return ans;
-        }
-    }
-// not found
-#ifdef DET
-    std::cout << "return empty because not found\n";
-#endif
-    return "";
+
+std::string KVStore::get(uint64_t key) {
+    std::string retStr = "";
+    getValueOrOffset(key, retStr);
+    return retStr;
+}
+
+void KVStore::getOffset(uint64_t key, SS_OFFSET_TL *userOffsetPtr) {
+    std::string tmpStr = "";
+    getValueOrOffset(key, tmpStr, userOffsetPtr);
 }
 /**
  * Delete the given key-value pair if it exists.
  * Returns false iff the key is not found.
  */
 bool KVStore::del(uint64_t key) {
-    // std::optional<std::string> res = memTable->get(key);
-    // if (!(res.has_value() && res.value() != "~DELETED")) return false;
     std::string res = get(key);
     if (res == "") return false;
-    // memTable->put(key, DELETE_MARK);
     put(key, DELETE_MARK);
     return true;
 }
@@ -162,18 +112,6 @@ void KVStore::reset() {
 }
 
 /**
- * Return a list including all the key-value pair between key1 and key2.
- * keys in the list should be in an ascending order.
- * An empty list indicates not found.
- */
-void KVStore::scan(uint64_t key1, uint64_t key2,
-                   std::list<std::pair<uint64_t, std::string>> &list) {
-    list.clear();
-    for (KEY_TL i = key1; i <= key2; i++)
-        list.push_back(std::make_pair(i, get(i)));
-}
-
-/**
  * This reclaims space from vLog by moving valid value and discarding invalid
  * value. chunk_size is the size in byte you should AT LEAST recycle.
  */
@@ -191,27 +129,18 @@ void KVStore::gc(uint64_t chunk_size) {
             tail + VLOG_MAGIC_BYTENUM + VLOG_CHECKSUM_BYTENUM;
         readDataFromVlog(vlogFile, curKey, offsetRecord);
         SS_OFFSET_TL sstOffsetRes = CONVENTIONAL_MISS_FLAG_OFFSET;
-        get(curKey, &sstOffsetRes);
+        getOffset(curKey, &sstOffsetRes);
         SS_VLEN_TL curVlen;
         offsetRecord += SS_KEY_BYTENUM;
         readDataFromVlog(vlogFile, curVlen, offsetRecord);
         if (sstOffsetRes == CONVENTIONAL_MISS_FLAG_OFFSET ||
             sstOffsetRes != tail) {
             // not latest data. do nothing
-            if (WATCHED_GC_KEY && curKey == WATCHED_GC_KEY)
-                std::cout << "not latest data. do nothing - ";
         } else {
             // is latest data
-            if (WATCHED_GC_KEY && curKey == WATCHED_GC_KEY)
-                std::cout << "IS latest data. put new value - ";
             std::string curValue;
             offsetRecord += SS_VLEN_BYTENUM;
             readValStringFromVlog(vlogFile, curValue, offsetRecord, curVlen);
-#ifdef GC_DEBUG
-            if (curKey == WATCHED_GC_KEY)
-                std::cout << "curValue: " << curValue << "\n";
-#endif
-            // del(curKey);
             put(curKey, curValue);
         }
 
@@ -233,16 +162,152 @@ void KVStore::gc(uint64_t chunk_size) {
     }
 }
 
+void KVStore::getValueOrOffset(uint64_t key, std::string &userStr,
+                               SS_OFFSET_TL *userOffsetPtr) {
+    std::optional<std::string> res = memTable->get(key);
+    if (res.has_value()) {
+        userStr = res.value() != DELETE_MARK ? res.value() : "";
+        return;
+    }
+    // #ifdef DET
+    //     std::cout << "memtable miss. Go to SST to find " << key << "\n";
+    // #endif
+    // cannot find in Memtable
+    if (enableCache) {
+        for (size_t i = 0; i < levelCache.size(); ++i) {
+            auto &level = levelCache[i];
+            SS_TIMESTAMP_TL maxTimeStamp = 0;
+            VALUE_TL ans = "";
+            SS_OFFSET_TL offsetAns = CONVENTIONAL_MISS_FLAG_OFFSET;
+            for (auto itemIter = level.begin(); itemIter != level.end();
+                 ++itemIter) {
+                auto &item = *itemIter;
+                if (key < item.second.minKey || key > item.second.maxKey)
+                    continue;
+                FILE_NUM_TL curUid = item.second.uid;
+                sstInfoItemProps *sstInfoItemPtr = hashCachePtrByUid[curUid];
+                SSTEntryProps offsetRes =
+                    findOffsetInSSTInfoItemPtr(sstInfoItemPtr, key);
+                if (offsetRes.offset == CONVENTIONAL_MISS_FLAG_OFFSET) {
+                    // not found in this SST
+                } else {
+                    // found in this SST
+                    if (!offsetRes.vlen) {
+                        if (sstInfoItemPtr->timeStamp > maxTimeStamp) {
+                            maxTimeStamp = sstInfoItemPtr->timeStamp;
+                            ans = "";
+                            offsetAns = offsetRes.offset;
+                        }
+                    } else {
+                        if (sstInfoItemPtr->timeStamp > maxTimeStamp) {
+                            maxTimeStamp = sstInfoItemPtr->timeStamp;
+                            ans = getValueByOffsetnVlen(offsetRes.offset,
+                                                        offsetRes.vlen);
+                            offsetAns = offsetRes.offset;
+                        }
+                    }
+                }
+            }
+            if (maxTimeStamp) {
+                // found at least one entry
+                if (userOffsetPtr != nullptr) {
+                    if (offsetAns != CONVENTIONAL_MISS_FLAG_OFFSET)
+                        *userOffsetPtr = offsetAns;
+                    return;
+                } else {
+                    userStr = ans;
+                    return;
+                }
+            }
+        }
+        // not found
+        userStr = "";
+        return;
+    } else {
+        // BANNED cache
+        std::vector<std::string> nameList;
+        int fileNum = utils::scanDir(dir, nameList);
+        std::sort(nameList.begin(), nameList.end());
+        for (int i = 0; i < fileNum; i++) {
+            SS_TIMESTAMP_TL maxTimeStamp = 0;
+            VALUE_TL ans = "";
+            SS_OFFSET_TL offsetAns = CONVENTIONAL_MISS_FLAG_OFFSET;
+
+            std::string curName = nameList[i];
+            int curLevel = 0;
+            std::string dirPath = dir + "/" + curName;
+            std::size_t pos = curName.find_last_of('-');
+            if (pos != std::string::npos) {
+                std::string levelStr = curName.substr(pos + 1);
+                curLevel = std::stoi(levelStr);
+            }
+            if (utils::dirExists(dirPath)) {
+                // it is a directory
+                // examine SST To Cache And LargestVars
+                std::vector<std::string> fileNameList;
+                int secondFileNum = utils::scanDir(dirPath, fileNameList);
+                for (int j = 0; j < secondFileNum; j++) {
+                    std::string curFilePath = dirPath + "/" + fileNameList[j];
+                    sstInfoItemProps fileItem;
+                    readFileNGetFileItem(curFilePath, fileItem);
+                    std::string::size_type suffix_pos =
+                        fileNameList[j].rfind(SS_FILE_SUFFIX);
+                    if (suffix_pos != std::string::npos) {
+                        std::string numStr =
+                            fileNameList[j].substr(0, suffix_pos);
+                        FILE_NUM_TL num =
+                            static_cast<FILE_NUM_TL>(std::stoi(numStr));
+                        fileItem.uid = num;
+                    }
+                    // got fileItem
+                    SSTEntryProps offsetRes =
+                        findOffsetInSSTInfoItemPtr(&fileItem, key);
+                    if (offsetRes.offset != CONVENTIONAL_MISS_FLAG_OFFSET) {
+                        // found in this SST
+                        if (!offsetRes.vlen) {
+                            if (fileItem.timeStamp > maxTimeStamp) {
+                                maxTimeStamp = fileItem.timeStamp;
+                                ans = "";
+                                offsetAns = offsetRes.offset;
+                            }
+                        } else {
+                            if (fileItem.timeStamp > maxTimeStamp) {
+                                maxTimeStamp = fileItem.timeStamp;
+                                ans = getValueByOffsetnVlen(offsetRes.offset,
+                                                            offsetRes.vlen);
+                                offsetAns = offsetRes.offset;
+                            }
+                        }
+                        if (curLevel) break;
+                    }
+                }
+                if (maxTimeStamp) {
+                    // found at least one entry
+                    if (userOffsetPtr != nullptr) {
+                        if (offsetAns != CONVENTIONAL_MISS_FLAG_OFFSET)
+                            *userOffsetPtr = offsetAns;
+                        return;
+                    } else {
+                        userStr = ans;
+                        return;
+                    }
+                }
+            }
+        }
+        // not found
+        userStr = "";
+        return;
+    }
+}
+
 void KVStore::fillCrcObj(std::vector<unsigned char> &crcObj, KEY_TYPE key,
                          VLEN_TYPE vlen, const VALUE_TYPE &value) {
     // Convert key to binary and insert into crcObj
     unsigned char *keyPtr = reinterpret_cast<unsigned char *>(&key);
     crcObj.insert(crcObj.end(), keyPtr, keyPtr + sizeof(KEY_TYPE));
-
     // Convert vlen to binary and insert into crcObj
     unsigned char *vlenPtr = reinterpret_cast<unsigned char *>(&vlen);
     crcObj.insert(crcObj.end(), vlenPtr, vlenPtr + sizeof(VLEN_TYPE));
-
     // Convert value to binary and insert into crcObj
     const unsigned char *valuePtr =
         reinterpret_cast<const unsigned char *>(value.data());
@@ -261,7 +326,7 @@ void KVStore::convertAndWriteMemTable() {
     memTable->scan(0, std::numeric_limits<uint64_t>::max(), list);
 
     for (const auto &item : list) {
-        VLOG_MAGIC_TL magic = 0xff;  // i.e. VLOG_MAGIC_TL
+        VLOG_MAGIC_TL magic = 0xff;
         SS_VLEN_TL vlen;
         VLOG_CHECKSUM_TL checksum;
         if (item.second == DELETE_MARK) {
@@ -318,7 +383,7 @@ void KVStore::convertAndWriteMemTable() {
         KEY_TL intervalMinKey, intervalMaxKey;
         long MinTrackIndexOfSonLevel;
         if (!targetLevel) {
-            // 生成前3条track
+            // 生成前3条归并track/指针
             MinTrackIndexOfSonLevel = 3;
             std::vector<KEY_TL> tmpMinKeyVector;
             std::vector<KEY_TL> tmpMaxKeyVector;
@@ -335,7 +400,7 @@ void KVStore::convertAndWriteMemTable() {
             intervalMaxKey = *std::max_element(tmpMaxKeyVector.begin(),
                                                tmpMaxKeyVector.end());
         } else {
-            // 不是第0层，则本层只需生成1条track
+            // 不是第0层，则本层只需生成1条归并track/指针
             MinTrackIndexOfSonLevel = 1;
             std::vector<sstInfoItemProps> reorderVec;
             for (auto &item : levelCache[targetLevel]) {
@@ -353,7 +418,7 @@ void KVStore::convertAndWriteMemTable() {
                           return a.minKey < b.minKey;
                       });
             // slippery:
-            // [前后逻辑贯通]忘记做下一层的区间覆盖,忘记保证下一层区间不相交性.
+            // [前后逻辑贯通]要做下一层的区间覆盖,要保证下一层区间不相交性.
             auto minElement = *std::min_element(
                 tmpFileInfoList.begin(), tmpFileInfoList.end(),
                 [](const sstInfoItemProps &a, const sstInfoItemProps &b) {
@@ -369,7 +434,7 @@ void KVStore::convertAndWriteMemTable() {
             if (!tmpFileInfoList.empty())
                 ptrTracks.push_back(PtrTrackProps(tmpFileInfoList));
         }
-        // 生成第4条track
+        // 生成第4条归并track/指针
         FILE_NUM_TL sonLevel = targetLevel + 1;
         if (levelCache.size() - 1 >= sonLevel &&
             !levelCache[sonLevel].empty()) {
@@ -407,7 +472,6 @@ void KVStore::convertAndWriteMemTable() {
                                             fileInfoItem.minKey);
             }
         }
-
 #ifdef LAST_WA
         if (!std::is_sorted(keyList.begin(), keyList.end())) {
             auto it = std::adjacent_find(keyList.begin(), keyList.end(),
@@ -420,11 +484,10 @@ void KVStore::convertAndWriteMemTable() {
             }
         }
 #endif
-
         // 将本地的K/O/V list写入disk&cache
         writeKOVListToDiskAndCache(keyList, offsetList, vlenList, sonLevel,
                                    maxTimeStampToWrite);
-        // 判断sonLevel的文件数是否达到上限
+        // 判断sonLevel的文件数是否达到上限，若达到上限则开启新一轮合并
         targetLevel = sonLevel;
     }
 }
@@ -477,7 +540,6 @@ void KVStore::readFileNGetFileItem(std::string filePath,
         fileItem.offsetList[i] = entry.offset;
         fileItem.vlenList[i] = entry.vlen;
     }
-
     file.close();
 }
 
@@ -522,9 +584,8 @@ void KVStore::readEntryFromSST(std::ifstream &file, SSTEntryProps &entry,
 KVStore::SSTEntryProps KVStore::findOffsetInSSTInfoItemPtr(
     KVStore::sstInfoItemProps *sstInfoItemPtr, KEY_TL key) {
     KVStore::SSTEntryProps entry(0, CONVENTIONAL_MISS_FLAG_OFFSET, 0);
-    if (!(sstInfoItemPtr->bf.query(key))) return entry;
+    if (enableBf && !(sstInfoItemPtr->bf.query(key))) return entry;
     // start binary search
-
     int left = 0, right = (sstInfoItemPtr->kvNum) - 1;
     while (left <= right) {
         int mid = (left + right) / 2;
@@ -543,7 +604,6 @@ KVStore::SSTEntryProps KVStore::findOffsetInSSTInfoItemPtr(
 }
 std::string KVStore::getValueByOffsetnVlen(SS_OFFSET_TL offset,
                                            SS_VLEN_TL vlen) {
-    // TODO: 考虑更新tail，并从tail开始读，而非0开始
     std::ifstream file(vlog, std::ios::binary);
     if (!file) {
         std::cerr << "Failed to open file: " << vlog << std::endl;
@@ -599,11 +659,6 @@ VLOG_CHECKSUM_TL KVStore::calcChecksum(const KEY_TL &curKey,
 void KVStore::deleteSSTInDisknCache(FILE_NUM_TL uid, FILE_NUM_TL level,
                                     KEY_TL minKey) {
     // delete in levelCache & hashCachePtrByUid
-    // #ifdef WATCH
-    // if (WATCHED_FILEUID && uid == WATCHED_FILEUID) {
-    //     std::cout << "deleteing the WATCHED file...\n";
-    // }
-    // #endif
     hashCachePtrByUid.erase(uid);
     for (auto it = levelCache[level].begin(); it != levelCache[level].end();) {
         if (it->first == minKey && it->second.uid == uid) {
@@ -634,19 +689,9 @@ void KVStore::mergeFilesAndReturnKOVList(std::vector<PtrTrackProps> &ptrTracks,
     std::priority_queue<TrackPointerProps, std::vector<TrackPointerProps>,
                         CompareForPointerQueue>
         pointerQueue;
-    // size_t tmpTrackIndex = -1;
     for (size_t tmpTrackIndex = 0; tmpTrackIndex < ptrTracks.size();
          tmpTrackIndex++) {
-        // tmpTrackIndex++;
         pointerQueue.push(TrackPointerProps(0, 0, tmpTrackIndex));
-        // for (auto &itemz : trackItem.fileInfoList) {
-        // #ifdef WATCH
-        // if (WATCHED_FILEUID && itemz.uid == WATCHED_FILEUID) {
-        //     std::cout << "spotted fileuid in all merging files: "
-        //               << WATCHED_FILEUID << "\n";
-        // }
-        // #endif
-        // }
     }
     while (!pointerQueue.empty()) {
         TrackPointerProps topPointer = pointerQueue.top();
@@ -655,14 +700,8 @@ void KVStore::mergeFilesAndReturnKOVList(std::vector<PtrTrackProps> &ptrTracks,
             &(ptrTracks[topPointer.trackIndex]
                   .fileInfoList[topPointer.fileIndex]);
         size_t topEntryIndex = topPointer.CacheItemIndex;
-        // #ifdef WATCH
-        // if (WATCHED_FILEUID && topFilePtr->uid == WATCHED_FILEUID) {
-        //     std::cout << "spotted fileuid in topPointer: " << WATCHED_FILEUID
-        //               << "\n";
-        // }
-        // #endif
         // 使所有可能的key相同的pointer右移
-        // slippery: 没写右移逻辑！
+        // slippery: 注意不要漏写右移逻辑
         KEY_TL topKey = topFilePtr->keyList[topEntryIndex];
         while (!pointerQueue.empty() &&
                ptrTracks[pointerQueue.top().trackIndex]
@@ -821,14 +860,13 @@ void KVStore::examineOld() {
         }
         if (utils::dirExists(dirPath)) {
             // it is a directory
-            // examineSSTToCacheAndLargestVars
+            // examine SST To Cache And LargestVars
             std::vector<std::string> fileNameList;
             int secondFileNum = utils::scanDir(dirPath, fileNameList);
             for (int j = 0; j < secondFileNum; j++) {
                 std::string curFilePath = dirPath + "/" + fileNameList[j];
                 sstInfoItemProps fileItem;
                 readFileNGetFileItem(curFilePath, fileItem);
-
                 std::string::size_type suffix_pos =
                     fileNameList[j].rfind(SS_FILE_SUFFIX);
                 if (suffix_pos != std::string::npos) {
@@ -849,7 +887,7 @@ void KVStore::examineOld() {
             }
         } else {
             // it is a file.
-            // examineVlogToHeadAndTail
+            // examine Vlog To Head And Tail
             std::ifstream vlogFile(dirPath, std::ifstream::binary);
             if (!vlogFile.is_open()) {
                 // handle error
@@ -860,7 +898,6 @@ void KVStore::examineOld() {
             SS_OFFSET_TL tailCandidate = afterHoleOffset;
             moveToFirstMagicPos(vlogFile, tailCandidate);
             if (tailCandidate == head) return;
-
             // tailCandidate
             while (!checkTailCandidateValidity(tailCandidate)) {
                 moveToFirstMagicPos(vlogFile, ++tailCandidate);
@@ -868,6 +905,101 @@ void KVStore::examineOld() {
             }
             tail = tailCandidate;
         }
+    }
+}
+
+/**
+ * Return a list including all the key-value pair between key1 and key2.
+ * keys in the list should be in an ascending order.
+ * An empty list indicates not found.
+ */
+void KVStore::scan(uint64_t key1, uint64_t key2,
+                   std::list<std::pair<uint64_t, std::string>> &list) {
+    list.clear();
+    if (OPTION_1) {
+        const std::vector<SS_OFFSET_TL> tmpOffsetVtr;
+        const std::vector<SS_VLEN_TL> tmpVlenVtr;
+        const std::list<KEY_TL> tmpMemtableList;
+        // memtable 指针
+        std::list<std::pair<uint64_t, std::string>> memtableList;
+        memTable->scanRange(key1, key2, memtableList);
+        if (!memtableList.empty()) {
+            std::vector<sstInfoItemProps> memtableVector;
+            memtableVector.emplace_back(sstInfoItemProps(
+                0, 0, memtableList.size(), key1, key2, tmpMemtableList.begin(),
+                tmpOffsetVtr.begin(), tmpVlenVtr.begin()));
+            ptrTracks.emplace_back(PtrTrackProps(memtableVector));
+        }
+
+        // Level 0 指针
+        for (const auto &entry : levelCache[0]) {
+            if (entry.second.maxKey >= key1 && entry.second.minKey <= key2) {
+                ptrTracks.emplace_back(PtrTrackProps({entry.second}));
+            }
+        }
+
+        // 其他层指针
+        for (FILE_NUM_TL level = 1; level < levelCache.size(); ++level) {
+            std::vector<sstInfoItemProps> trackFiles;
+            for (const auto &entry : levelCache[level]) {
+                if (entry.second.maxKey >= key1 &&
+                    entry.second.minKey <= key2) {
+                    trackFiles.push_back(entry.second);
+                }
+            }
+            if (!trackFiles.empty()) {
+                ptrTracks.emplace_back(PtrTrackProps(trackFiles));
+            }
+        }
+
+        // 多路归并
+        std::priority_queue<TrackPointerProps, std::vector<TrackPointerProps>,
+                            CompareForPointerQueue>
+            pointerQueue;
+        for (size_t i = 0; i < ptrTracks.size(); ++i) {
+            if (!ptrTracks[i].fileInfoList.empty()) {
+                pointerQueue.emplace(TrackPointerProps(0, 0, i));
+            }
+        }
+
+        while (!pointerQueue.empty()) {
+            TrackPointerProps topPointer = pointerQueue.top();
+            pointerQueue.pop();
+
+            const sstInfoItemProps *topFilePtr =
+                &ptrTracks[topPointer.trackIndex]
+                     .fileInfoList[topPointer.fileIndex];
+            size_t topEntryIndex = topPointer.CacheItemIndex;
+
+            KEY_TL topKey = topFilePtr->keyList[topEntryIndex];
+            if (topKey >= key1 && topKey <= key2) {
+                SS_VLEN_TL vlen = topFilePtr->vlenList[topEntryIndex];
+                if (vlen > 0) {
+                    std::string value;
+                    std::ifstream vlogFile(vlog, std::ios::binary);
+                    readValStringFromVlog(vlogFile, value,
+                                          topFilePtr->offsetList[topEntryIndex],
+                                          vlen);
+                    list.emplace_back(topKey, value);
+                } else {
+                    list.emplace_back(topKey, DELETE_MARK);
+                }
+            }
+
+            // 更新指针
+            topPointer.CacheItemIndex++;
+            if (topPointer.CacheItemIndex == topFilePtr->kvNum) {
+                topPointer.CacheItemIndex = 0;
+                topPointer.fileIndex++;
+            }
+            if (topPointer.fileIndex <
+                ptrTracks[topPointer.trackIndex].fileInfoList.size()) {
+                pointerQueue.push(topPointer);
+            }
+        }
+    } else {
+        for (KEY_TL i = key1; i <= key2; i++)
+            list.push_back(std::make_pair(i, get(i)));
     }
 }
 
@@ -1015,112 +1147,3 @@ void KVStore::lookInMemtable(KEY_TL key) {
     else
         std::cout << "NOT spot in memtable\n";
 }
-//
-// void KVStore::simpleConvertMemTable2File() {
-//     // write to vLog
-//     std::ofstream vlogFile(vlog, std::ios::binary | std::ios::app);
-//     if (!vlogFile.is_open()) {
-//         std::cerr << "Failed to open vlogFile: " + vlog + " for writing.\n";
-//         return;
-//     }
-//     std::list<std::pair<KEY_TL, std::string>> list;
-//     std::vector<SS_OFFSET_TL> offsetList;
-//     KEY_TL minKey, maxKey;  // for writing to SST
-//     memTable->scan(0, std::numeric_limits<uint64_t>::max(), list);
-//     if (!list.empty()) {
-//         minKey = list.front().first;
-//         maxKey = list.back().first;
-//     } else {
-//         std::cerr << "MemTable is empty.\n";
-//         return;
-//     }
-//     for (const auto &item : list) {
-//         VLOG_MAGIC_TL magic = 0xff;  // i.e. VLOG_MAGIC_TL
-//         SS_VLEN_TL vlen;
-//         VLOG_CHECKSUM_TL checksum;
-//         if (item.second == DELETE_MARK) {
-//             vlen = 0;
-//             checksum = calcChecksum(item.first, vlen, "");
-//         } else {
-//             vlen = item.second.length();
-//             checksum = calcChecksum(item.first, vlen, item.second);
-//         }
-//         // start writing
-//         head = vlogFile.tellp();
-//         offsetList.push_back(head);
-//         if (item.second == DELETE_MARK) {
-//             // writeVlogEntry(vlogFile, magic, checksum, item.first, vlen,
-//             "");
-//         } else {
-//             writeVlogEntry(vlogFile, magic, checksum, item.first, vlen,
-//                            item.second);
-//         }
-//     }
-//     head = vlogFile.tellp();
-//     vlogFile.close();
-//     // write to SSTable. TODO: 现在只做了全部新建到0层
-//     FILE_NUM_TL targetLevel = 0;
-//     // check largestUid
-//     FILE_NUM_TL newUid = ++largestUid;
-//     std::string targetPath = dir + SS_DIR_PATH_SUFFIX_WITHOUT_LEVELNUM +
-//                              std::to_string(targetLevel),
-//                 newFileName = std::to_string(newUid) + SS_FILE_SUFFIX,
-//                 newFilePath = targetPath + "/" + newFileName;
-//     if (!utils::dirExists(targetPath)) utils::_mkdir(targetPath);
-//     // try to open sstFile
-//     std::fstream fileCheck(newFilePath);
-//     if (!fileCheck) {
-//         // The file does not exist, create a new one.
-//         std::ofstream newFile(newFilePath);
-//         if (!newFile) {
-//             std::cerr << "Failed to create the file: " << newFilePath <<
-//             "\n"; return;
-//         }
-//         newFile.close();
-//     }
-//     fileCheck.close();
-//     // Now, the file is guaranteed to exist. Open it and write.
-//     std::ofstream sstFile(newFilePath,
-//                           std::ios::app);  // Open the file in append mode.
-//     if (!sstFile) {
-//         std::cerr << "Failed to open the file: " << newFilePath << "\n";
-//         return;
-//     }
-//     FILE_NUM_TL curTimeStamp = ++largestTimeStamp;
-//     SST_HEADER_KVNUM_TL kvNum = list.size();
-//     sstFile.write(reinterpret_cast<const char *>(&curTimeStamp),
-//                   sizeof(curTimeStamp));
-//     sstFile.write(reinterpret_cast<const char *>(&kvNum), sizeof(kvNum));
-//     sstFile.write(reinterpret_cast<const char *>(&minKey), sizeof(minKey));
-//     sstFile.write(reinterpret_cast<const char *>(&maxKey), sizeof(maxKey));
-//     // write bloom filter to SST
-//     BF newBF;
-//     for (const auto &item : list) newBF.insert(item.first);
-//     char buffer = 0;
-//     for (int i = 0; i < DEFAULT_M_VAL; i++) {
-//         buffer = (buffer << 1) | newBF.bitArray[i];
-//         if ((i + 1) % 8 == 0) {
-//             sstFile.write(reinterpret_cast<const char *>(&buffer),
-//                           sizeof(buffer));
-//             buffer = 0;
-//         }
-//     }
-
-//     int index = -1;
-//     for (const auto &item : list) {
-//         index++;
-//         writeSSTEntry(sstFile, item.first, offsetList[index],
-//                       item.second == DELETE_MARK ? 0 : item.second.length());
-//     }
-//     sstFile.close();
-//     // 更新sstInfo
-//     if (sstInfoLevelList.size() < targetLevel + 1) {
-//         sstInfoLevelList.resize(targetLevel + 1);
-//     }
-//     sstInfoLevelList[targetLevel].push_back(
-//         sstInfoItemProps(newUid, curTimeStamp, minKey, maxKey));
-
-//     // TODO: 从第0层开始处理可能的compaction
-//     // 多余，debug用
-//     // sstFile.close();
-// }

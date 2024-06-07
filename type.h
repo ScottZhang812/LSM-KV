@@ -1,114 +1,41 @@
-#ifndef __TYPE_H
-#define __TYPE_H
 #include <cstdint>
-#include <filesystem>
-#include <list>
 #include <string>
-#include <vector>
-using u64 = uint64_t;
-using u32 = uint32_t;
-using u16 = uint16_t;
-using u8 = uint8_t;
-using TKey = u64;
-using TOff = u64;
-using TLen = u32;
-using TCheckSum = u16;
-using TMagic = u8;
-using TValue = std::string;
-using TBytes = std::vector<u8>;
-using kEntry = struct kEntry {
-  TKey key;
-  TOff offset;
-  TLen len;
-  bool operator==(const kEntry &rhs) const {
-    return key == rhs.key && offset == rhs.offset && len == rhs.len;
-  }
-  // NOTE：a < b. a's priority < b. a's key > b's or a's key == b's and a's
-  // offset < b's(older) to keep the min key at the top of the priority queue(if
-  // equal, the newest one at the top)
-  bool operator<(const kEntry &rhs) const {
-    return key > rhs.key || (key == rhs.key && offset < rhs.offset);
-  }
-  bool operator>(const kEntry &rhs) const {
-    return key < rhs.key || (key == rhs.key && offset > rhs.offset);
-  }
-  bool is_deleted() { return len == 0; }
-};
-using kEntrys = std::vector<kEntry>;
-using vEntryPrefix = struct prefix {
-  TMagic magic;
-  TCheckSum checksum;
-  TKey key;
-  TLen vlen;
-};
 
-using vEntry = struct VEntry {
-  TMagic magic;
-  TCheckSum checksum;
-  TKey key;
-  TLen vlen;
-  TValue vvalue;
-};
-using vEntryProps = struct VEntryProps {
-  TKey key;
-  TLen vlen;
-  TValue vvalue;
-};
-using TPath = std::filesystem::path;
-// vEntry:{char magic, uint16 checksum, uint32 vlen, string}
+// BloomFilter
+#define DEFAULT_HASHFUN_NUM 1
+#define DEFAULT_M_VAL 4096
 
-using vEntrys = std::list<vEntry>;
-namespace type {
-static kEntry ke_not_found = {0, 0, 0};
-static vEntry ve_not_found = {0, 0, 0, 0, ""};
-constexpr static u64 ve_prefix_len =
-    sizeof(TMagic) + sizeof(TCheckSum) + sizeof(TKey) + sizeof(TLen);
+// KVStore
+typedef uint64_t KEY_TL;  // TL means 'type for LSM'
+typedef std::string VALUE_TL;
+typedef uint64_t SS_OFFSET_TL;
+typedef uint32_t SS_VLEN_TL;
+typedef uint8_t VLOG_MAGIC_TL;
+typedef uint16_t VLOG_CHECKSUM_TL;
+typedef uint64_t FILE_NUM_TL;
+typedef FILE_NUM_TL SS_TIMESTAMP_TL;
+typedef uint64_t SST_HEADER_KVNUM_TL;
+typedef int SST_LEVEL_TL;
 
-} // namespace type
-namespace config {
-
-static int bf_default_k = 3;
-static u64 bf_default_size = 8 * 1024 * 8; // 8KB = 8*8*1024 bit
-static bool use_bf = true;
-static bool use_cache = true;
-using ConfigParam = struct ConfigParam {
-  int bf_default_size;
-  int bf_default_k;
-  bool use_bf;
-  bool use_cache;
-  friend std::ostream &operator<<(std::ostream &os, const ConfigParam &conf);
-};
-inline std::ostream &operator<<(std::ostream &os, const ConfigParam &conf) {
-  auto out_format = "use_bf: %s, use_cache: %s\nbf_size: %d, bf_func_num: %d\n";
-  char out[256];
-  auto tf_tos = [](bool cond) { return cond ? "true" : "false"; };
-
-  sprintf(out, out_format, tf_tos(conf.use_bf), tf_tos(conf.use_cache),
-          conf.bf_default_size, conf.bf_default_k);
-  os << out;
-  return os;
-}
-static inline void reConfig(const config::ConfigParam &newConfig) {
-  auto [use_bf, use_cache, bf_default_size, bf_default_k] = newConfig;
-  if (!use_cache) {
-    config::use_cache = false;
-    config::use_bf = false;
-    config::bf_default_k = 0;
-    config::bf_default_size = 0;
-  };
-  if (use_cache && !use_bf) {
-    config::use_cache = true;
-    config::use_bf = false;
-    config::bf_default_k = 0;
-    config::bf_default_size = 0;
-  }
-  if (use_cache && use_bf) {
-    config::use_cache = true;
-    config::use_bf = true;
-    config::bf_default_k = bf_default_k;
-    config::bf_default_size = bf_default_size;
-  }
-}
-} // namespace config
-
-#endif
+#define SS_HEADER_BYTENUM 32
+#define SS_BLOOM_BYTENUM (DEFAULT_M_VAL / 8)
+#define SS_KEY_BYTENUM sizeof(KEY_TL)
+#define SS_OFFSET_BYTENUM sizeof(SS_OFFSET_TL)
+#define SS_VLEN_BYTENUM sizeof(SS_VLEN_TL)
+#define SS_MAX_FILE_BYTENUM 16384  // 16 * 1024
+#define SS_TIMESTAMP_BYTENUM sizeof(SS_TIMESTAMP_TL)
+#define SS_KVNUM_BYTENUM sizeof(SST_HEADER_KVNUM_TL)
+#define VLOG_MAGIC_BYTENUM sizeof(VLOG_MAGIC_TL)
+#define VLOG_CHECKSUM_BYTENUM sizeof(VLOG_CHECKSUM_TL)
+#define SS_FILE_SUFFIX ".sst"
+#define VLOG_DEFAULT_MAGIC_VAL 0xff
+#define SS_DIR_PATH_SUFFIX_WITHOUT_LEVELNUM "/level-"
+#define MAX_SST_KV_GROUP_NUM 792  // actually same as memTableLenThreshold
+#define MAX_CACHE_ENTRIES 1000000
+#define SS_ENTRY_BYTENUM (SS_KEY_BYTENUM + SS_OFFSET_BYTENUM + SS_VLEN_BYTENUM)
+#define DELETE_MARK "~DELETED~"
+#define CONVENTIONAL_MISS_FLAG_OFFSET 1
+#define MAX_FILE_NUM_GIVEN_LEVEL(level) ((FILE_NUM_TL)1 << (level + 1))
+#define WATCHED_KEY 0
+#define WATCHED_GC_KEY 0
+#define WATCHED_FILEUID 0
