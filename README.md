@@ -1,5 +1,17 @@
 ## Project LSM-KV: KVStore using Log-structured Merge Tree
 
+### TL;DR (Brief Introduction)
+
+- Developed a **high-performance key-value store in C++ on Linux** by implementing and optimizing a Log-Structured
+Merge (LSM) Tree data structure.
+
+- Implemented the MemTable component using a **skip list** and integrated a **Bloom filter**.
+
+- Reduced write amplification through **key-value separation** storage optimizations and integrated **garbage collection** to
+prevent log entry bloat.
+
+### Contents
+
 
 The handout files include two main parts:
 
